@@ -95,18 +95,28 @@
     },
 
     "departments": {
-      "type": "array",
-      "description": "V2: 全局部门注册表（PM/UI/研发/QA/运维…）。Agent.department 必须引用这里的 id；小队抽调按部门取人。",
-      "additionalProperties": false,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id"],
-        "properties": {
-          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
-          "title": { "type": "string", "description": "展示名，如 '研发部'" }
+      "oneOf": [
+        {
+          "type": "array",
+          "description": "旧形式（向后兼容）：部门 id 列表 [{id,title}]，无继承机制。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+              "title": { "type": "string", "description": "展示名，如 '研发部'" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "Phase 2b 部门实体化：key = 部门 id。支持 head/tools/boundaries/template；员工继承部门 tools（并集）与 boundaries（合并收紧）；template 引用预设模板，引擎加载时解包注入运行态。",
+          "patternProperties": { "^[a-z][a-z0-9_-]*$": { "$ref": "#/definitions/Department" } },
+          "additionalProperties": false
         }
-      }
+      ],
+      "description": "V2: 全局部门注册表。旧数组形式（id 列表）与新实体字典形式（head/tools/boundaries/template）均可；Agent.department 引用部门 id，小队横抽按部门取人。"
     },
 
     "squads": {
@@ -191,8 +201,8 @@
         "tools": {
           "type": "array",
           "uniqueItems": true,
-          "description": "Whitelist of tools this agent may use. Empty array = pure text-only agent.",
-          "items": { "type": "string", "enum": ["read_file", "write_file", "patch", "terminal", "web_search", "web_extract", "git", "browser"] }
+          "description": "Whitelist of tools this agent may use. Empty array = pure text-only agent. Phase 2b: 'compiler' = 编译/构建类工具（模板标配），与 'terminal' 并列。",
+          "items": { "type": "string", "enum": ["read_file", "write_file", "patch", "terminal", "compiler", "web_search", "web_extract", "git", "browser"] }
         },
         "workspace": { "type": "string", "default": "./", "description": "Sandbox path this agent may touch" },
         "maxTurns": { "type": "integer", "minimum": 1, "default": 12, "description": "ReAct step budget per execution" },
@@ -273,6 +283,32 @@
             "rollbackToLevel": { "type": "integer", "minimum": 0, "description": "Overrides qa.rollback.targetLevel for this node" }
           }
         }
+      }
+    },
+
+    "Department": {
+      "type": "object",
+      "description": "Phase 2b 部门实体：从字符串标签升级为真实组织实体。员工继承部门 tools（并集）+ boundaries（合并收紧）。",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "description": "展示名，如 '研发部'" },
+        "head": { "type": "string", "description": "部门负责人（Department Head）的 Agent ID；Org Chart 的中间层节点" },
+        "tools": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "部门专属工具库：该部门所有员工自动继承（与员工个人 tools 取并集）"
+        },
+        "boundaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "部门级安全约束（只读 / 禁外网等）：与员工个人 boundaries 合并，mustNot 取并集（只收紧不放权）",
+          "properties": {
+            "mustNot": { "type": "array", "items": { "type": "string" } },
+            "requiresHumanApproval": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "template": { "type": "string", "description": "引用的预设模板 ID（如 'agile_dev_squad'），引擎加载时解包注入运行态" }
       }
     },
 

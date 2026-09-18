@@ -1,0 +1,39 @@
+{
+  "meta": { "name": "mock-org-templates Phase2b 组织架构+模板演示", "version": "0.5.0", "projectRoot": ".", "timezone": "Asia/Tokyo" },
+  "departments": {
+    "dev": {
+      "title": "研发部（猫咪敏捷小队）",
+      "template": "agile_dev_squad",
+      "head": "backend_cat",
+      "tools": ["read_file", "write_file"],
+      "boundaries": { "mustNot": ["外网请求"] }
+    },
+    "qa": {
+      "title": "QA 部（值守组）",
+      "template": "qa_watchdog",
+      "head": "review_cat"
+    }
+  },
+  "agents": {
+    "pm_human": {
+      "id": "pm_human", "role": "产品经理（显式定义，不来自模板）", "provider": "mock",
+      "department": "dev",
+      "tools": [],
+      "boundaries": { "mustNot": ["写代码"] },
+      "outputs": [{ "name": "prdoc", "kind": "text" }]
+    }
+  },
+  "levels": [
+    { "index": 0, "name": "L0 PM 立项（继承部门标配）", "nodes": [
+      { "id": "n1_prdoc", "agent": "pm_human", "task": "写需求文档" } ] },
+    { "index": 1, "name": "L1 猫咪并发实现（模板注入员工）", "gate": "all", "nodes": [
+      { "id": "n2_ui", "agent": "frontend_cat", "task": "UI 实现", "branch": "feat/ui" },
+      { "id": "n3_api", "agent": "backend_cat", "task": "API 实现", "branch": "feat/api" } ] },
+    { "index": 2, "name": "L2 QA 猫监验收（模板注入）", "nodes": [
+      { "id": "n4_qa", "kind": "qa", "agent": "qa_cat", "task": "验收 cats 产物",
+        "inputs": ["n2_ui.ui_patch", "n3_api.api_patch"], "onError": { "policy": "failFast", "rollbackToLevel": 1 } } ] }
+  ],
+  "qa": { "onFailure": ["console", "redHighlight", "rollback"],
+           "rollback": { "targetLevel": 1, "keepCheckpoint": true, "notifyProgress": true },
+           "retry": { "maxAttempts": 2, "backoffSeconds": 1 } }
+}

@@ -215,7 +215,8 @@ class Orchestrator:
             return await squad_ex.run(nd, level["index"], upstream.outcomes)
 
         agent_ref = nd.get("agent")
-        agent = self.wf.agents[agent_ref] if agent_ref else {}
+        # ★ Phase 2b：继承视图（个人 ∪ 部门：tools 并集 / boundaries 收紧）——executor 消费的是合并后员工
+        agent = self.wf.resolved_agent(agent_ref) if agent_ref else {}
         executor = NodeExecutor(node=nd, agent=agent, wf=self.wf, bus=self.bus,
                                 progress=self.progress, resource_manager=self.rm,
                                 git_policy=self.git_policy)

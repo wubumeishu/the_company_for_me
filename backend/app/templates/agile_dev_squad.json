@@ -1,0 +1,39 @@
+{
+  "template_id": "agile_dev_squad",
+  "title": "敏捷研发小队（开箱即用）",
+  "description": "预置一个前端猫咪 + 一个后端猫咪 + 一个 QA 猫监，标配编译器(compiler)与文件读写工具。department 引用本模板 = 引擎加载时解包注入运行态（显式 agent 定义优先，绝不覆盖）。",
+  "departmentHead": "backend_cat",
+  "departmentTools": ["read_file", "write_file", "patch", "terminal", "compiler"],
+  "departmentBoundaries": {
+    "mustNot": ["直改主干 main（必须走分支 + PR 门禁）", "删除他人代码"]
+  },
+  "agents": [
+    {
+      "id": "frontend_cat",
+      "role": "前端猫咪（UI 实现）",
+      "provider": "mock",
+      "model": "cat-ui-1",
+      "tools": ["read_file", "write_file", "patch", "terminal", "compiler"],
+      "boundaries": { "mustNot": ["改动后端接口", "改样式系统 token"] },
+      "outputs": [ { "name": "ui_patch", "kind": "text" } ]
+    },
+    {
+      "id": "backend_cat",
+      "role": "后端猫咪（API 实现）",
+      "provider": "mock",
+      "model": "cat-api-1",
+      "tools": ["read_file", "write_file", "patch", "terminal", "compiler", "git"],
+      "boundaries": { "mustNot": ["改动前端组件", "提交到主干 main"] },
+      "outputs": [ { "name": "api_patch", "kind": "text" } ]
+    },
+    {
+      "id": "qa_cat",
+      "role": "QA 猫监（验收）",
+      "provider": "mock",
+      "model": "cat-qa-1",
+      "tools": ["read_file", "terminal", "compiler", "git"],
+      "boundaries": { "mustNot": ["修改业务代码", "跳过验收门禁"] },
+      "outputs": [ { "name": "verdict", "kind": "text" } ]
+    }
+  ]
+}
