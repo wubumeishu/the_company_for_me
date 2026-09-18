@@ -31,7 +31,7 @@ from .ws.stream import Hub, stream_endpoint
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT                        # progress.md / checkpoint 落仓库根
 
-app = FastAPI(title="the-company engine", version="0.3.0")
+app = FastAPI(title="the-company engine", version="0.4.0")
 
 # 全局单例：一个 Hub（进程级广播中枢）+ run 记录
 hub = Hub(bus=EventBus(run_id="engine"))   # engine bus 只挂 hub；每个 run 有独立 bus
@@ -67,18 +67,24 @@ async def run(req: RunRequest) -> dict[str, Any]:
     root = req.project_root or str(DEFAULT_ROOT)
     bus = EventBus()
     progress = ProgressLog(root)
-    orch = Orchestrator(wf, bus, progress, checkpoint_root=root)
+    # ★ V2：资源管理器（provider 限流冷却门 + 状态机 + Tick 心跳随 orchestrator.run() 起停）
+    from .engine.resource_manager import ResourceManager
+    rm = ResourceManager(wf, bus)
+    orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm)
 
     # run 事件接入 Hub：本 run 的所有事件扇出给每个 WS 客户端（按 ?run_id= 过滤）
     hub.link(bus)
 
     run_id = bus.run_id
-    RUNS[run_id] = {"workflow": wf.workflow_id, "status": "running", "result": None}
+    RUNS[run_id] = {"workflow": wf.workflow_id, "status": "running", "result": None,
+                    "rm": rm, "bus": bus}
 
     async def _drive() -> None:
         result = await orch.run()
         RUNS[run_id]["status"] = "done" if result["success"] else "failed"
         RUNS[run_id]["result"] = result
+        # run 结束：快照终态资源状态（供 /resources 历史查询）
+        RUNS[run_id]["resources"] = rm.snapshot()
 
     import asyncio
     asyncio.create_task(_drive())
@@ -97,6 +103,20 @@ app.add_api_websocket_route("/ws/run", stream_endpoint(hub))
 @app.get("/runs")
 async def runs() -> list[dict[str, Any]]:
     return [dict(v, run_id=k) for k, v in RUNS.items()]
+
+
+@app.get("/resources/{run_id}")
+async def resources(run_id: str) -> dict[str, Any]:
+    """V2 站会大盘数据源：某 run 结束时的员工资源快照（状态/余量/恢复时刻/部门）。
+    未结束的 run 返回实时快照；未知 run_id = 404。"""
+    entry = RUNS.get(run_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"未知 run_id {run_id}")
+    rm: Optional["ResourceManager"] = entry.get("rm")
+    if rm is None:
+        raise HTTPException(status_code=409, detail="该 run 无资源管理器（Phase1 旧 run）")
+    snap = entry.get("resources") or rm.snapshot()
+    return {"run_id": run_id, "status": entry["status"], "states": snap}
 
 
 if __name__ == "__main__":

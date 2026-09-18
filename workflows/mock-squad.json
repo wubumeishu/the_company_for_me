@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "name": "mock-squad V2 全链路（部门+小队+限流冷却）",
+    "version": "0.4.0",
+    "projectRoot": ".",
+    "timezone": "Asia/Tokyo",
+    "tickIntervalSec": 0.5
+  },
+  "departments": [
+    { "id": "pm", "title": "PM 部" },
+    { "id": "dev", "title": "研发部" },
+    { "id": "qa", "title": "QA 部" }
+  ],
+  "agents": {
+    "mock_pm": { "id": "mock_pm", "role": "PM(模拟)", "provider": "mock", "department": "pm",
+      "tools": ["read_file"], "boundaries": { "mustNot": ["写代码"] },
+      "outputs": [{ "name": "spec", "kind": "text" }] },
+    "mock_dev_a": { "id": "mock_dev_a", "role": "研发A(模拟)", "provider": "mock", "department": "dev",
+      "tools": ["write_file"], "boundaries": { "mustNot": ["越界"] },
+      "outputs": [{ "name": "code", "kind": "text" }] },
+    "mock_dev_b": { "id": "mock_dev_b", "role": "研发B(模拟)", "provider": "mock", "department": "dev",
+      "tools": ["write_file"], "boundaries": { "mustNot": ["越界"] },
+      "outputs": [{ "name": "code", "kind": "text" }] },
+    "mock_qa": { "id": "mock_qa", "role": "QA(模拟)", "provider": "mock", "department": "qa",
+      "tools": ["read_file", "terminal"], "boundaries": { "mustNot": ["修改业务代码"] },
+      "outputs": [{ "name": "qa_verdict", "kind": "text" }] }
+  },
+  "squads": {
+    "big_feature_squad": {
+      "description": "高价值特性敏捷小队：PM+Dev×2+QA，UI 工具覆盖预留",
+      "members": [
+        { "from": "pm", "as": "pm" },
+        { "from": "dev", "as": "dev" },
+        { "from": "dev", "as": "dev", "agent": "mock_dev_b", "toolsOverride": ["agnes-ai-image"] },
+        { "from": "qa", "as": "qa" }
+      ],
+      "dissolveOn": "squad_qa_pass"
+    }
+  },
+  "levels": [
+    { "index": 0, "name": "L0 需求", "nodes": [
+      { "id": "n0_spec", "agent": "mock_pm", "task": "产出 spec（含 42k 级预估负载）",
+        "tokenBudget": { "estimate": 42000, "contextHint": 32000, "outputHint": 10000 } } ] },
+    { "index": 1, "name": "L1 敏捷小队", "nodes": [
+      { "id": "n1_squad", "kind": "squad", "squad": "big_feature_squad",
+        "agent": "mock_dev_a", "task": "大型特性：横抽 1PM+2Dev+1QA 组队讨论并交付",
+        "inputs": ["n0_spec.spec"],
+        "tokenBudget": { "estimate": 60000, "contextHint": 50000, "outputHint": 10000 } } ] },
+    { "index": 2, "name": "L2 QA 验收", "nodes": [
+      { "id": "n2_qa", "agent": "mock_qa", "kind": "qa", "task": "验收小队交付",
+        "inputs": ["n1_squad.squad_summary"] } ] }
+  ],
+  "qa": {
+    "onFailure": ["console", "redHighlight", "rollback"],
+    "rollback": { "targetLevel": 1, "keepCheckpoint": true, "notifyProgress": true },
+    "retry": { "maxAttempts": 2, "backoffSeconds": 1 }
+  }
+}

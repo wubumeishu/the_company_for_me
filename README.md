@@ -86,8 +86,11 @@ npm install && npm run dev          # http://127.0.0.1:5180
 ## 验收命令（build 成功 ≠ QA 通过，必须实际运行）
 
 ```bash
-# 后端全链路 e2e（解析JSON→校验→并发执行→QA拦截→回退→打卡，15 项断言）
+# 后端 Phase 1 全链路 e2e（解析JSON→校验→并发执行→QA拦截→回退→打卡，15 项断言）
 cd backend && python tests/test_e2e.py
+
+# 后端 Phase 2 V2 单测（冷却恢复时间精确计算 + Tick 调度 + 敏捷小队 + 冷却挂起集成，30 项）
+cd backend && python tests/test_resource_manager.py
 
 # 前端布局不变量（同级同行 Y 锁行 + X 均布，node 直跑）
 cd frontend && node scripts/dump-snapshot.mjs
@@ -114,5 +117,11 @@ cd frontend && npm run build
 - [x] 仓库绑定 + 基线版本控制
 - [x] Phase 1：FastAPI 引擎骨架（行并发 gather + barrier + QA 拦截回退）+ React Flow 同行布局 + WS 实时日志
       · 后端 e2e 15/15 PASS；前端 tsc 0 错 + 生产构建成功；布局不变量 node 实测
-- [ ] Phase 2：provider 适配（Ollama 本地 / Codex CLI / Claude 真 LLM 通道）+ checkpoint 回退实测 + NodeInspector（画布→workflow.json 双向）
-- [ ] Phase 3：用示例 workflow.json 接真实 LLM 端到端跑通 L0→L1→L2 QA
+- [x] Phase 2a：后端资源调度 + 部门/小队架构（"机制先行，视觉延后"战略）
+      · schema 升级：departments / tokenBudget / rate.windows / squads（向后兼容，旧配置零改动）
+      · `resource_manager.py`：RateLedger 多窗口滑动冷却 + 状态机（ACTIVE/RESTING/SQUAD_DEPLOYED）+ TickDriver 心跳
+      · `squad.py`：敏捷小队横抽 + SquadRoom 共享会议室 + QA 门禁 + 自动解散归建
+      · orchestrator 重构：挂起等待（冷却→tick 唤醒→重跑）+ squad 节点分派
+      · 单测 30/30 PASS（冷却恢复时间精确计算 / Tick 调度 / 小队 / 部门校验 / 冷却挂起集成）
+- [ ] Phase 2b/2c：工位视觉（咖啡厅冷却皮肤、案卷堆叠高度映射 tokenBudget）、真实 LLM provider（Ollama/Codex/Claude）
+- [ ] Phase 3：Git 分支隔离 + PR/Lint 拦截 + 站会大盘 + 持久化数据基座（datastore 驱动）

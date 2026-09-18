@@ -16,7 +16,8 @@
         "version": { "type": "string", "description": "Semver, e.g. 1.0.0" },
         "description": { "type": "string" },
         "projectRoot": { "type": "string", "default": "./", "description": "Project root where progress.md lives" },
-        "timezone": { "type": "string", "default": "Asia/Tokyo", "description": "Timezone for progress.md timestamps" }
+        "timezone": { "type": "string", "default": "Asia/Tokyo", "description": "Timezone for progress.md timestamps" },
+        "tickIntervalSec": { "type": "number", "minimum": 0.1, "default": 0.5, "description": "V2 Tick heartbeat interval (ResourceManager/TickDriver). 0.5s default; 1s also fine." }
       }
     },
 
@@ -91,6 +92,65 @@
       "type": "array",
       "description": "Optional provider registry (local Ollama / Codex CLI / Claude). Nodes reference a provider + model; missing defaults fall back to config.yaml.",
       "items": { "$ref": "#/definitions/Provider" }
+    },
+
+    "departments": {
+      "type": "array",
+      "description": "V2: 全局部门注册表（PM/UI/研发/QA/运维…）。Agent.department 必须引用这里的 id；小队抽调按部门取人。",
+      "additionalProperties": false,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+          "title": { "type": "string", "description": "展示名，如 '研发部'" }
+        }
+      }
+    },
+
+    "squads": {
+      "type": "object",
+      "description": "V2: 敏捷小队注册表。kind=squad 的节点引用 squad id 触发横抽：从各部门临时抽调成员（可带工具覆盖，如 UI 调文生图/视频），共享 SquadRoom 会议室状态，子任务完成后自动解散归建。",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["members"],
+        "properties": {
+          "description": { "type": "string" },
+          "members": {
+            "type": "array",
+            "minItems": 1,
+            "description": "抽调名单：每项 from = 部门 id（或具体 agent id），as = 小队内角色，agent = 可选指定具体员工，toolsOverride = 小队内临时加挂的工具",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["from"],
+              "properties": {
+                "from": { "type": "string", "description": "部门 id；validator 会解析成该部门下的 agent（可配 agent 指定到人）" },
+                "agent": { "type": "string", "description": "直接指定 agent id（优先于 from 部门解析）" },
+                "as": { "type": "string", "description": "小队内角色名，如 pm/ui/dev/qa" },
+                "toolsOverride": { "type": "array", "items": { "type": "string" }, "description": "该成员在小队内临时可用的工具（如 agnes-ai-image / agnes-ai-video）" }
+              }
+            }
+          },
+          "dissolveOn": { "type": "string", "default": "squad_qa_pass", "description": "解散条件：squad_qa_pass = 小队 QA 子任务通过即自动解散归建" }
+        }
+      }
+    },
+
+    "datastore": {
+      "type": "object",
+      "description": "V2: 持久化数据基座接口层（本地 JSON 起步，预留 BaaS 切换）。引擎核心只依赖 StorageDriver 接口。",
+      "additionalProperties": false,
+      "properties": {
+        "driver": { "type": "string", "enum": ["local-json", "sqlite", "baas"], "default": "local-json" },
+        "collections": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["hr_pool", "growth", "problem_bank"] },
+          "description": "启用哪些持久化面板：HR 招聘池 / 员工成长值 / 踩坑知识库（哈希链不可篡改）"
+        }
+      }
     }
   },
 
@@ -115,6 +175,17 @@
         "workspace": { "type": "string", "default": "./", "description": "Sandbox path this agent may touch" },
         "maxTurns": { "type": "integer", "minimum": 1, "default": 12, "description": "ReAct step budget per execution" },
         "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "department": { "type": "string", "description": "V2: department id from the top-level departments registry (e.g. 'pm', 'ui', 'dev', 'qa', 'ops'). Squads 横向抽调按部门取人。" },
+        "departmentRole": { "type": "string", "description": "V2: title within the department, e.g. 'Senior Frontend Engineer'." },
+        "stamina": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "V2: 体力资源（游戏化外壳）。max = 体力上限；regenPerMin = 每分钟回复量。窗口余量不足时 ResourceManager 强制该 agent RESTING。",
+          "properties": {
+            "max": { "type": "integer", "minimum": 1, "default": 100 },
+            "regenPerMin": { "type": "number", "minimum": 0, "default": 10 }
+          }
+        },
         "boundaries": {
           "type": "object",
           "description": "Role boundary contract — what this agent MUST NOT do (prevents task crossing / 逻辑混乱).",
@@ -150,11 +221,22 @@
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "description": "Globally unique across all levels" },
         "label": { "type": "string", "description": "Human label rendered on the canvas node" },
         "agent": { "type": "string", "description": "Agent id from the agents registry" },
-        "kind": { "type": "string", "enum": ["agent", "qa", "review", "gate"], "default": "agent", "description": "qa/review nodes execute the QA/Review mechanism; gate is a pure barrier" },
+        "kind": { "type": "string", "enum": ["agent", "qa", "review", "gate", "squad"], "default": "agent", "description": "qa/review nodes execute the QA/Review mechanism; gate is a pure barrier; squad (V2) triggers the 敏捷小队横抽 mechanism — node declares the squad id, engine assembles PM+Dev+QA from departments, runs them on a shared SquadRoom state, auto-dissolves on subtask completion." },
+        "squad": { "type": "string", "description": "V2: for kind=squad — the squad id from the top-level squads registry that this node instantiates." },
         "task": { "type": "string", "description": "The concrete subtask prompt (what to do, expected outputs)" },
         "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional intra-level soft dependencies (row is still parallel; edges are visual only, row gate remains the hard barrier)" },
         "inputs": { "type": "array", "items": { "type": "string" }, "description": "Reference upstream node outputs as 'nodeId.outputName'" },
         "toolOverrides": { "type": "array", "items": { "type": "string" }, "description": "Per-node tool whitelist override (intersection with agent.tools)" },
+        "tokenBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "V2: 工位负载数据源。estimate = 本任务预估 Token 总量（工位案卷高度 / 资源调度权重）；缺省时加载器由 TokenEstimator 启发式补全。",
+          "properties": {
+            "estimate": { "type": "integer", "minimum": 0, "description": "预估总 Token 量（~42000 = 42k tok）" },
+            "contextHint": { "type": "integer", "minimum": 0, "description": "其中上下文窗口部分" },
+            "outputHint": { "type": "integer", "minimum": 0, "description": "其中输出部分" }
+          }
+        },
         "timeoutSeconds": { "type": "integer", "minimum": 1 },
         "reviewCriteria": { "type": "string", "description": "For kind=qa/review: acceptance criteria the reviewer agent checks" },
         "onError": {
@@ -180,7 +262,29 @@
         "type": { "type": "string", "enum": ["ollama", "openai-compat", "anthropic", "codex-cli", "builtin"] },
         "baseUrl": { "type": "string", "description": "e.g. http://127.0.0.1:11434 (Ollama)" },
         "apiKeyEnv": { "type": "string", "description": "Env var name holding the key; key itself never stored in workflow.json" },
-        "defaultModel": { "type": "string" }
+        "defaultModel": { "type": "string" },
+        "rate": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "V2: provider-level rate limit (API 冷却即强制休息的配额来源)。windows 支持多窗口（分钟级 + 小时级）；任一窗口触底 → 该 provider 名下 agent 全 RESTING。",
+          "properties": {
+            "windows": {
+              "type": "array",
+              "minItems": 1,
+              "description": "限速窗口列表，如 [{limit:160, periodSec:60}, {limit:1500, periodSec:18000}]",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["limit", "periodSec"],
+                "properties": {
+                  "limit": { "type": "integer", "minimum": 1, "description": "窗口内允许的最大请求/Token 数" },
+                  "periodSec": { "type": "integer", "minimum": 1, "description": "窗口周期（秒）" }
+                }
+              }
+            },
+            "cooldownSec": { "type": "integer", "minimum": 0, "default": 0, "description": "触限后额外强制冷却秒数（咖啡厅小坐）" }
+          }
+        }
       }
     }
   }
