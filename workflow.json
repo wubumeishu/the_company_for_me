@@ -1,0 +1,102 @@
+{
+  "meta": {
+    "name": "虚拟软件公司 · 多智能体工作流",
+    "version": "1.0.0",
+    "description": "本地多智能体编排基准示例：同一层级并发执行，QA 行失败红框回退",
+    "projectRoot": "./",
+    "timezone": "Asia/Tokyo"
+  },
+
+  "agents": {
+    "architect": {
+      "id": "architect",
+      "role": "首席架构师",
+      "provider": "claude",
+      "model": "claude-sonnet-4-5",
+      "tools": ["read_file", "write_file", "patch"],
+      "systemPrompt": "你是架构师。输入：需求。输出：可执行的模块拆分与数据契约。不得编写业务实现代码。",
+      "boundaries": {
+        "mustNot": ["修改业务逻辑实现", "删除他人产出文件"],
+        "requiresHumanApproval": ["对外发布接口变更"]
+      },
+      "outputs": [{ "name": "module_split", "kind": "text" }]
+    },
+    "fe_engineer": {
+      "id": "fe_engineer",
+      "role": "前端工程师",
+      "provider": "codex",
+      "model": "codex-cli",
+      "tools": ["read_file", "write_file", "patch", "terminal"],
+      "systemPrompt": "你负责 frontend/ 下的 React Flow 画布与节点组件。只改自己的目录。",
+      "workspace": "./frontend",
+      "boundaries": { "mustNot": ["触碰后端调度引擎"] }
+    },
+    "be_engineer": {
+      "id": "be_engineer",
+      "role": "后端工程师",
+      "provider": "codex",
+      "model": "codex-cli",
+      "tools": ["read_file", "write_file", "patch", "terminal"],
+      "systemPrompt": "你负责 backend/ 下的 FastAPI 调度引擎与 provider 适配。",
+      "workspace": "./backend",
+      "boundaries": { "mustNot": ["触碰前端画布"] }
+    },
+    "qa_reviewer": {
+      "id": "qa_reviewer",
+      "role": "QA 评审员",
+      "provider": "ollama",
+      "model": "llama3.1:8b",
+      "tools": ["read_file", "terminal"],
+      "systemPrompt": "你按 reviewCriteria 验收，只读 + 运行验证命令，不修改业务代码。失败必须给出红框原因。",
+      "maxTurns": 8,
+      "boundaries": { "mustNot": ["修改业务代码", "直接标记任务完成"], "requiresHumanApproval": ["覆盖已验收产出"] },
+      "outputs": [{ "name": "qa_verdict", "kind": "text" }]
+    }
+  },
+
+  "levels": [
+    {
+      "index": 0,
+      "name": "L0 拆分",
+      "gate": "all",
+      "nodes": [
+        { "id": "n0_split", "agent": "architect", "task": "按 IDEA.md 拆分 Phase 1 模块，产出 module_split" }
+      ]
+    },
+    {
+      "index": 1,
+      "name": "L1 并发实现",
+      "gate": "all",
+      "nodes": [
+        { "id": "n1_fe", "agent": "fe_engineer", "task": "实现 React Flow 画布 + 同行约束布局", "inputs": ["n0_split.module_split"], "timeoutSeconds": 600 },
+        { "id": "n1_be", "agent": "be_engineer", "task": "实现 FastAPI 引擎 + Ollama/Codex/Claude provider + WebSocket 流", "inputs": ["n0_split.module_split"], "timeoutSeconds": 600 }
+      ]
+    },
+    {
+      "index": 2,
+      "name": "L2 QA/Review",
+      "gate": "all",
+      "nodes": [
+        {
+          "id": "n2_qa",
+          "agent": "qa_reviewer",
+          "kind": "qa",
+          "task": "验收 L1 两个节点产出",
+          "reviewCriteria": "frontend 构建通过且同行节点 Y 坐标一致；backend 单测通过且 WebSocket 事件齐全；progress.md 已登记。失败 -> 红框 + 回退 L1。",
+          "onError": { "policy": "failFast", "rollbackToLevel": 1 }
+        }
+      ]
+    }
+  ],
+
+  "qa": {
+    "onFailure": ["console", "redHighlight", "rollback"],
+    "rollback": { "targetLevel": 1, "keepCheckpoint": true, "notifyProgress": true },
+    "retry": { "maxAttempts": 2, "backoffSeconds": 5 }
+  },
+
+  "providers": [
+    { "id": "ollama-local", "type": "ollama", "baseUrl": "http://127.0.0.1:11434", "defaultModel": "llama3.1:8b" },
+    { "id": "claude-api", "type": "anthropic", "apiKeyEnv": "ANTHROPIC_API_KEY", "defaultModel": "claude-sonnet-4-5" }
+  ]
+}

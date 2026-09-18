@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# 本地运行态（不进版本库）
+progress.md
+*.checkpoint.json
+.env
+.DS_Store

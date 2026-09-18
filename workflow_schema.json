@@ -1,0 +1,187 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://local.company/workflow_schema.json",
+  "title": "VirtualCompanyWorkflow",
+  "description": "Code-driven + visual-node local multi-agent orchestration contract. Reference philosophies: Haaziq386/Agent-Orchestration (React Flow canvas + FastAPI engine, parallel scheduling), akudo7/kudosflow (config-as-JSON, canvas edits only overwrite workflow.json), gabriel-eidelman/agent-flow-visualization (WebSocket live stream of agent thinking / tool calls / shell logs).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meta", "agents", "levels", "qa"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name":  { "type": "string", "description": "Workflow / company name" },
+        "version": { "type": "string", "description": "Semver, e.g. 1.0.0" },
+        "description": { "type": "string" },
+        "projectRoot": { "type": "string", "default": "./", "description": "Project root where progress.md lives" },
+        "timezone": { "type": "string", "default": "Asia/Tokyo", "description": "Timezone for progress.md timestamps" }
+      }
+    },
+
+    "agents": {
+      "type": "object",
+      "description": "Agent (virtual employee) registry. Each agent declares role boundaries so tasks cannot cross roles.",
+      "additionalProperties": {
+        "$ref": "#/definitions/Agent"
+      }
+    },
+
+    "levels": {
+      "type": "array",
+      "description": "Execution hierarchy. Each element = one horizontal row in the React Flow canvas; ALL nodes inside a level execute in parallel, and the renderer pins their Y coordinate to the level index. Downstream level depends on ALL upstream levels completing.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "name", "nodes"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0, "description": "Row index; must equal the array position and strictly increase by 1" },
+          "name": { "type": "string", "description": "Row label, e.g. 'L0 Intake', 'L1 Implement', 'L2 QA/Review'" },
+          "gate": {
+            "type": "string",
+            "enum": ["all", "any"],
+            "default": "all",
+            "description": "Row gate: 'all' = every node must succeed before next row (kudosflow-style barrier); 'any' = quorum row"
+          },
+          "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/definitions/Node" }
+          }
+        }
+      }
+    },
+
+    "qa": {
+      "type": "object",
+      "description": "QA/Review node mechanism: error -> console log + red highlight on flow graph + state rollback + auto recovery path.",
+      "additionalProperties": false,
+      "required": ["onFailure"],
+      "properties": {
+        "onFailure": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["console", "redHighlight", "rollback", "retry", "manual"] },
+          "description": "Effects that MUST all fire when a QA gate fails. console + redHighlight + rollback are the baseline trio."
+        },
+        "rollback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["targetLevel"],
+          "properties": {
+            "targetLevel": { "type": "integer", "minimum": 0, "description": "Level index to roll back to; its nodes re-execute after rollback" },
+            "keepCheckpoint": { "type": "boolean", "default": true, "description": "Preserve execution checkpoint so rolled-back row re-runs instead of full restart" },
+            "notifyProgress": { "type": "boolean", "default": true, "description": "Also register the rollback event into progress.md" }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxAttempts": { "type": "integer", "minimum": 1, "default": 2 },
+            "backoffSeconds": { "type": "integer", "minimum": 0, "default": 5 }
+          }
+        }
+      }
+    },
+
+    "providers": {
+      "type": "array",
+      "description": "Optional provider registry (local Ollama / Codex CLI / Claude). Nodes reference a provider + model; missing defaults fall back to config.yaml.",
+      "items": { "$ref": "#/definitions/Provider" }
+    }
+  },
+
+  "definitions": {
+    "Agent": {
+      "type": "object",
+      "description": "A virtual employee: role, provider/model, tool permissions, prompt contract, and hard boundaries (no role crossing).",
+      "additionalProperties": false,
+      "required": ["id", "role", "provider", "tools", "boundaries"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "role": { "type": "string", "description": "Job title, e.g. 'Frontend Engineer', 'QA Reviewer', 'DevOps'" },
+        "provider": { "type": "string", "enum": ["ollama", "codex", "claude", "builtin"], "description": "Which backend executes this agent" },
+        "model": { "type": "string", "description": "Model id, provider-specific (e.g. 'llama3.1:8b', 'claude-sonnet-4-5', 'codex-cli')" },
+        "systemPrompt": { "type": "string", "description": "Role system prompt (inputs/outputs/boundaries spelled out)" },
+        "tools": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Whitelist of tools this agent may use. Empty array = pure text-only agent.",
+          "items": { "type": "string", "enum": ["read_file", "write_file", "patch", "terminal", "web_search", "web_extract", "git", "browser"] }
+        },
+        "workspace": { "type": "string", "default": "./", "description": "Sandbox path this agent may touch" },
+        "maxTurns": { "type": "integer", "minimum": 1, "default": 12, "description": "ReAct step budget per execution" },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "boundaries": {
+          "type": "object",
+          "description": "Role boundary contract — what this agent MUST NOT do (prevents task crossing / 逻辑混乱).",
+          "additionalProperties": false,
+          "properties": {
+            "mustNot": { "type": "array", "items": { "type": "string" } },
+            "requiresHumanApproval": { "type": "array", "items": { "type": "string" }, "description": "Actions needing 主人 sign-off, e.g. ['rm -rf', 'git push']" }
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "description": "Named output artifacts this agent must produce; QA gates check these.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "kind"],
+            "properties": {
+              "name": { "type": "string" },
+              "kind": { "type": "string", "enum": ["file", "text", "artifact"] },
+              "path": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+
+    "Node": {
+      "type": "object",
+      "description": "A DAG node = one subtask assigned to one agent. Same level = same row = parallel.",
+      "additionalProperties": false,
+      "required": ["id", "agent", "task"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "description": "Globally unique across all levels" },
+        "label": { "type": "string", "description": "Human label rendered on the canvas node" },
+        "agent": { "type": "string", "description": "Agent id from the agents registry" },
+        "kind": { "type": "string", "enum": ["agent", "qa", "review", "gate"], "default": "agent", "description": "qa/review nodes execute the QA/Review mechanism; gate is a pure barrier" },
+        "task": { "type": "string", "description": "The concrete subtask prompt (what to do, expected outputs)" },
+        "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional intra-level soft dependencies (row is still parallel; edges are visual only, row gate remains the hard barrier)" },
+        "inputs": { "type": "array", "items": { "type": "string" }, "description": "Reference upstream node outputs as 'nodeId.outputName'" },
+        "toolOverrides": { "type": "array", "items": { "type": "string" }, "description": "Per-node tool whitelist override (intersection with agent.tools)" },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "reviewCriteria": { "type": "string", "description": "For kind=qa/review: acceptance criteria the reviewer agent checks" },
+        "onError": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-node error policy; baseline is the global qa.onFailure trio (console + redHighlight + rollback).",
+          "properties": {
+            "policy": { "type": "string", "enum": ["failFast", "retry", "skip"], "default": "failFast" },
+            "retryCount": { "type": "integer", "minimum": 0 },
+            "rollbackToLevel": { "type": "integer", "minimum": 0, "description": "Overrides qa.rollback.targetLevel for this node" }
+          }
+        }
+      }
+    },
+
+    "Provider": {
+      "type": "object",
+      "description": "Local-first provider endpoint registry (Ollama / Codex / Claude / builtin).",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["ollama", "openai-compat", "anthropic", "codex-cli", "builtin"] },
+        "baseUrl": { "type": "string", "description": "e.g. http://127.0.0.1:11434 (Ollama)" },
+        "apiKeyEnv": { "type": "string", "description": "Env var name holding the key; key itself never stored in workflow.json" },
+        "defaultModel": { "type": "string" }
+      }
+    }
+  }
+}
