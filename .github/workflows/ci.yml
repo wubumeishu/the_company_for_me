@@ -1,0 +1,44 @@
+# Phase 3a 第三道防线：CI 门禁（PR 自动跑，红灯 = QA 拦截打回）
+# 与 ARCHITECTURE_V2 §3 对齐：引擎权威层(simulated/subprocess) + 仓库 hooks(人护栏) + CI 门禁(红灯回流)
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    name: 后端全链路（e2e + V2资源调度 + 3a PR门禁）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 装依赖
+        run: pip install fastapi "uvicorn[standard]" jsonschema websockets
+      - name: Phase 1 e2e（行并发+QA拦截+回退+打卡）
+        run: cd backend && python tests/test_e2e.py
+      - name: Phase 2 V2 单测（冷却恢复时间+Tick调度+敏捷小队）
+        run: cd backend && python tests/test_resource_manager.py
+      - name: Phase 3a 单测（分支隔离+PR门禁+冲突红灯）
+        run: cd backend && python tests/test_git_policy.py
+
+  frontend:
+    name: 前端严格类型 + 布局不变量
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: 装依赖
+        run: cd frontend && npm install --no-audit --no-fund
+      - name: tsc 严格类型（0 错）
+        run: cd frontend && npx tsc --noEmit
+      - name: 同级同行布局不变量
+        run: cd frontend && node scripts/dump-snapshot.mjs
+      - name: 生产构建
+        run: cd frontend && npx vite build

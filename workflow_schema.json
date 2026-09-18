@@ -151,6 +151,28 @@
           "description": "启用哪些持久化面板：HR 招聘池 / 员工成长值 / 踩坑知识库（哈希链不可篡改）"
         }
       }
+    },
+
+    "git_policy": {
+      "type": "object",
+      "description": "V2 (Phase 3a): Git 分支隔离与 PR 门禁。三道防线之第一道（引擎权威层）= Python 子进程/模拟；第二道 = 仓库分发的 git hooks（防人绕过）；第三道 = CI 红灯回流。",
+      "additionalProperties": false,
+      "required": ["backend"],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["simulated", "subprocess", "hooks", "ci"],
+          "default": "simulated",
+          "description": "simulated=影子仓库内存 diff（Phase 2 过渡，零外部依赖）；subprocess=asyncio 子进程真 git；hooks=git hooks 第二道；ci=远端 CI 门禁"
+        },
+        "baseBranch": { "type": "string", "default": "main", "description": "PR 目标分支（主干）" },
+        "repoPath": { "type": "string", "description": "被管理的本地仓库路径；缺省=projectRoot" },
+        "checkScripts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "pr_gate 节点并行执行的门禁脚本（如 ['python -m pytest backend/tests/', 'node scripts/dump-snapshot.mjs']）。任一 exit≠0 = 红灯 = 拦截打回"
+        }
+      }
     }
   },
 
@@ -221,8 +243,10 @@
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "description": "Globally unique across all levels" },
         "label": { "type": "string", "description": "Human label rendered on the canvas node" },
         "agent": { "type": "string", "description": "Agent id from the agents registry" },
-        "kind": { "type": "string", "enum": ["agent", "qa", "review", "gate", "squad"], "default": "agent", "description": "qa/review nodes execute the QA/Review mechanism; gate is a pure barrier; squad (V2) triggers the 敏捷小队横抽 mechanism — node declares the squad id, engine assembles PM+Dev+QA from departments, runs them on a shared SquadRoom state, auto-dissolves on subtask completion." },
+        "kind": { "type": "string", "enum": ["agent", "qa", "review", "gate", "squad", "pr_gate"], "default": "agent", "description": "qa/review nodes execute the QA/Review mechanism; gate is a pure barrier; squad (V2) triggers the 敏捷小队横抽 mechanism — node declares the squad id, engine assembles PM+Dev+QA from departments, runs them on a shared SquadRoom state, auto-dissolves on subtask completion; pr_gate (V2) opens PRs for upstream dev branches and runs the merge gate (conflict + check scripts) — any red = 拦截打回" },
         "squad": { "type": "string", "description": "V2: for kind=squad — the squad id from the top-level squads registry that this node instantiates." },
+        "branch": { "type": "string", "description": "V2 (git_policy): isolated branch this dev node commits to. Default = node id. 禁止多 agent 直改主干文件——每个 Dev 只在 <branch> 上开发。" },
+        "gate": { "type": "string", "enum": ["lint", "test", "style", "conflict", "all"], "default": "all", "description": "V2: checks this node enforces. pr_gate nodes run the full merge gate: conflict dry-run + git_policy.checkScripts. Any red → pr_rejected + 红框回退三件套。" },
         "task": { "type": "string", "description": "The concrete subtask prompt (what to do, expected outputs)" },
         "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional intra-level soft dependencies (row is still parallel; edges are visual only, row gate remains the hard barrier)" },
         "inputs": { "type": "array", "items": { "type": "string" }, "description": "Reference upstream node outputs as 'nodeId.outputName'" },

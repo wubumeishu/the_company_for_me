@@ -1,0 +1,38 @@
+{
+  "meta": { "name": "mock-git-pr Phase3a 分支隔离+PR门禁演示", "version": "0.4.0", "projectRoot": ".", "timezone": "Asia/Tokyo" },
+  "departments": [ { "id": "dev", "title": "研发部" }, { "id": "qa", "title": "QA 部" } ],
+  "agents": {
+    "mock_dev_a": { "id": "mock_dev_a", "role": "研发A(模拟)", "provider": "mock", "department": "dev",
+      "tools": ["write_file", "git"], "boundaries": { "mustNot": ["直改主干 main"] },
+      "outputs": [{ "name": "mod_a", "kind": "text" }] },
+    "mock_dev_b": { "id": "mock_dev_b", "role": "研发B(模拟)", "provider": "mock", "department": "dev",
+      "tools": ["write_file", "git"], "boundaries": { "mustNot": ["直改主干 main"] },
+      "outputs": [{ "name": "mod_b", "kind": "text" }] },
+    "mock_reviewer": { "id": "mock_reviewer", "role": "代码评审员(模拟)", "provider": "mock", "department": "qa",
+      "tools": ["read_file", "terminal", "git"], "boundaries": { "mustNot": ["修改业务代码"] },
+      "outputs": [{ "name": "review", "kind": "text" }] }
+  },
+  "git_policy": {
+    "backend": "simulated",
+    "baseBranch": "main",
+    "checkScripts": [ "python tests/test_e2e.py" ]
+  },
+  "levels": [
+    { "index": 0, "name": "L0 并发开发（分支隔离）", "gate": "all", "nodes": [
+      { "id": "n1_dev_a", "agent": "mock_dev_a", "task": "实现模块A（提交到隔离分支 dev-a）", "branch": "dev-a" },
+      { "id": "n1_dev_b", "agent": "mock_dev_b", "task": "实现模块B（提交到隔离分支 dev-b）", "branch": "dev-b" } ] },
+    { "index": 1, "name": "L1 PR 门禁", "nodes": [
+      { "id": "n2_pr", "kind": "pr_gate", "agent": "mock_reviewer",
+        "task": "对 dev 分支开 PR 并跑合并门禁（冲突+脚本）",
+        "inputs": ["n1_dev_a.mod_a", "n1_dev_b.mod_b"],
+        "gate": "all",
+        "onError": { "policy": "failFast", "rollbackToLevel": 0 } } ] },
+    { "index": 2, "name": "L2 QA 验收", "nodes": [
+      { "id": "n3_qa", "kind": "qa", "agent": "mock_reviewer",
+        "task": "验收合并证据（sha 可溯源）",
+        "inputs": ["n2_pr.merge_sha"] } ] }
+  ],
+  "qa": { "onFailure": ["console", "redHighlight", "rollback"],
+           "rollback": { "targetLevel": 0, "keepCheckpoint": true, "notifyProgress": true },
+           "retry": { "maxAttempts": 2, "backoffSeconds": 1 } }
+}

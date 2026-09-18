@@ -1,0 +1,16 @@
+#!/bin/sh
+# 第二道防线：commit-msg —— 校验提交信息（任务标签 + 角色不越界）
+# 规范："<node或角色>: <动作>"（引擎代提交的格式），人类提交需带 [PR-xxx] 或 [hotfix] 标记
+msg="$(cat "$1")"
+case "$msg" in
+  "[n1"*"|n1:"*|"n2:"*|"qa/*:"*|"git_policy"*|"[pr-gate]"*)  # 引擎代提交 / pr_gate 角色
+    exit 0 ;;
+  *"\[PR-"*)  # 人类提交：必须关联 PR
+    exit 0 ;;
+  *"[hotfix]"*)
+    exit 0 ;;
+  *)
+    echo "✗ commit-msg 护栏：提交信息需带 [PR-xxx] / [hotfix] 标记（角色越界防护）"
+    echo "  格式参照：'[PR-012] docs: 更新 README'"
+    exit 1 ;;
+esac
