@@ -12,6 +12,7 @@ dist/
 
 # 本地运行态（不进版本库）
 progress.md
+.company/
 *.checkpoint.json
 .env
 .DS_Store

@@ -71,23 +71,39 @@
 ## 运行方式
 
 ```bash
-# 后端
-cd backend && uvicorn app.main:app --port 8790
+# 后端（backend/ 下，本机依赖已备：fastapi / uvicorn / jsonschema）
+cd backend
+python -m uvicorn app.main:app --port 8790
 
-# 前端
-cd frontend && npm run dev
+# 前端（frontend/ 下）
+cd frontend
+npm install && npm run dev          # http://127.0.0.1:5180
 
-# 画布编辑 → 保存仅覆盖 workflow.json → 引擎读它执行
+# 全链路：画布加载 workflow.json → 点 ▶ 启动 run（POST /run）
+#          → 引擎按行并发执行 → /ws/run 事件流回画布（节点变色/红框）+ LiveLogPanel
 ```
 
-（Phase 1 骨架实现后此节替换为可执行步骤。）
+## 验收命令（build 成功 ≠ QA 通过，必须实际运行）
+
+```bash
+# 后端全链路 e2e（解析JSON→校验→并发执行→QA拦截→回退→打卡，15 项断言）
+cd backend && python tests/test_e2e.py
+
+# 前端布局不变量（同级同行 Y 锁行 + X 均布，node 直跑）
+cd frontend && node scripts/dump-snapshot.mjs
+
+# 前端严格类型 + 生产构建
+cd frontend && npm run build
+```
+
 
 ## 版本控制规范
 
 - **仓库**：`wubumeishu/the_company_for_me`（main 分支，push 走代理端口 7890）
 - **SemVer + tag**：
-  - `v0.x.y` — 契约/文档阶段（草案，允许破坏性修改）
-  - `v1.0.0` — Phase 1 骨架（引擎 + 画布 + WS 三件套跑通端到端）
+  - `v0.x.y` — 契约/文档/骨架阶段（草案，允许破坏性修改）
+    · `v0.1.0` 契约基线 / `v0.2.0` 文档基线 / `v0.3.0` Phase 1 骨架（mock provider 全链路跑通）
+  - `v1.0.0` — 接真实 LLM provider（Ollama/Codex/Claude）后，引擎+画布+WS 三件套端到端可用
   - 每次里程碑打 tag：`git tag -a vX.Y.Z -m "..."` 并 push tag
 - **分支**：`main` 始终可验收；功能开发用 `feat/<name>` 短分支，QA/Review 节点机制先行（红线：build 成功 ≠ QA 通过，必须实际运行验证）
 - **入库规则**：契约/代码/文档入库；`progress.md`、`.env`、`node_modules/`、`__pycache__/`、`.venv/` 一律不入库
@@ -96,6 +112,7 @@ cd frontend && npm run dev
 
 - [x] 数据契约 `workflow_schema.json` + 可校验示例
 - [x] 仓库绑定 + 基线版本控制
-- [ ] Phase 1：FastAPI 引擎骨架 + React Flow 同行布局 + WS 实时日志
-- [ ] Phase 2：provider 适配（Ollama 本地 / Codex / Claude）+ checkpoint 回退实测
-- [ ] Phase 3：用示例 workflow.json 端到端跑通 L0→L1→L2 QA
+- [x] Phase 1：FastAPI 引擎骨架（行并发 gather + barrier + QA 拦截回退）+ React Flow 同行布局 + WS 实时日志
+      · 后端 e2e 15/15 PASS；前端 tsc 0 错 + 生产构建成功；布局不变量 node 实测
+- [ ] Phase 2：provider 适配（Ollama 本地 / Codex CLI / Claude 真 LLM 通道）+ checkpoint 回退实测 + NodeInspector（画布→workflow.json 双向）
+- [ ] Phase 3：用示例 workflow.json 接真实 LLM 端到端跑通 L0→L1→L2 QA

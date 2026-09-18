@@ -1,0 +1,25 @@
+{
+  "meta": { "name": "mock-demo-fail QA拦截+回退演示", "version": "0.3.0", "projectRoot": ".", "timezone": "Asia/Tokyo" },
+  "agents": {
+    "mock_pm": { "id": "mock_pm", "role": "PM(模拟)", "provider": "mock", "tools": ["read_file"],
+      "boundaries": { "mustNot": ["写代码"] }, "outputs": [{ "name": "spec", "kind": "text" }] },
+    "mock_dev": { "id": "mock_dev", "role": "工程师(模拟)", "provider": "mock", "tools": ["write_file"],
+      "boundaries": { "mustNot": ["越界"] }, "outputs": [{ "name": "code", "kind": "text" }] },
+    "mock_qa": { "id": "mock_qa", "role": "QA(模拟)", "provider": "mock", "tools": ["read_file"],
+      "boundaries": { "mustNot": ["修改业务代码"] }, "outputs": [{ "name": "qa_verdict", "kind": "text" }] }
+  },
+  "levels": [
+    { "index": 0, "name": "L0", "nodes": [
+      { "id": "n0_spec", "agent": "mock_pm", "task": "产出 spec" } ] },
+    { "index": 1, "name": "L1 并发", "gate": "all", "nodes": [
+      { "id": "n1_a", "agent": "mock_dev", "task": "模块A", "inputs": ["n0_spec.spec"] },
+      { "id": "n1_b", "agent": "mock_dev", "task": "模块B", "inputs": ["n0_spec.spec"] } ] },
+    { "index": 2, "name": "L2 QA", "nodes": [
+      { "id": "n2_qa", "agent": "mock_qa", "kind": "qa",
+        "task": "验收（sim_fail 演示拦截）", "inputs": ["n1_a.code", "n1_b.code"],
+        "reviewCriteria": "产物非空", "onError": { "policy": "failFast", "rollbackToLevel": 1 } } ] }
+  ],
+  "qa": { "onFailure": ["console", "redHighlight", "rollback"],
+           "rollback": { "targetLevel": 1, "keepCheckpoint": true, "notifyProgress": true },
+           "retry": { "maxAttempts": 2, "backoffSeconds": 1 } }
+}

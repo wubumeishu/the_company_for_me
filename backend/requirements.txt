@@ -1,0 +1,5 @@
+# Phase 1 骨架依赖（本机已装 fastapi 0.133 / uvicorn / jsonschema）
+fastapi>=0.110
+uvicorn[standard]>=0.29
+jsonschema>=4.19
+websockets>=12

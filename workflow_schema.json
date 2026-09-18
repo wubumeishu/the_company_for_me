@@ -103,7 +103,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
         "role": { "type": "string", "description": "Job title, e.g. 'Frontend Engineer', 'QA Reviewer', 'DevOps'" },
-        "provider": { "type": "string", "enum": ["ollama", "codex", "claude", "builtin"], "description": "Which backend executes this agent" },
+        "provider": { "type": "string", "enum": ["ollama", "codex", "claude", "mock", "builtin"], "description": "Which backend executes this agent ('mock' = deterministic local stub for offline prototyping & testing)" },
         "model": { "type": "string", "description": "Model id, provider-specific (e.g. 'llama3.1:8b', 'claude-sonnet-4-5', 'codex-cli')" },
         "systemPrompt": { "type": "string", "description": "Role system prompt (inputs/outputs/boundaries spelled out)" },
         "tools": {
