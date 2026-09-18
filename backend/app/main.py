@@ -70,7 +70,10 @@ async def run(req: RunRequest) -> dict[str, Any]:
     # ★ V2：资源管理器（provider 限流冷却门 + 状态机 + Tick 心跳随 orchestrator.run() 起停）
     from .engine.resource_manager import ResourceManager
     rm = ResourceManager(wf, bus)
-    orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm)
+    # ★ Phase 3a：Git 分支隔离 + PR 门禁（仅 workflow 配了 git_policy 时启用）
+    from .engine.git_policy import GitPolicy
+    gp = GitPolicy(wf, bus) if wf.raw.get("git_policy") else None
+    orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm, git_policy=gp)
 
     # run 事件接入 Hub：本 run 的所有事件扇出给每个 WS 客户端（按 ?run_id= 过滤）
     hub.link(bus)

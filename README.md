@@ -92,6 +92,9 @@ cd backend && python tests/test_e2e.py
 # 后端 Phase 2 V2 单测（冷却恢复时间精确计算 + Tick 调度 + 敏捷小队 + 冷却挂起集成，30 项）
 cd backend && python tests/test_resource_manager.py
 
+# 后端 Phase 3a 单测（分支隔离 + PR 门禁 + 冲突红灯，17 项）
+cd backend && python tests/test_git_policy.py
+
 # 前端布局不变量（同级同行 Y 锁行 + X 均布，node 直跑）
 cd frontend && node scripts/dump-snapshot.mjs
 
@@ -124,4 +127,9 @@ cd frontend && npm run build
       · orchestrator 重构：挂起等待（冷却→tick 唤醒→重跑）+ squad 节点分派
       · 单测 30/30 PASS（冷却恢复时间精确计算 / Tick 调度 / 小队 / 部门校验 / 冷却挂起集成）
 - [ ] Phase 2b/2c：工位视觉（咖啡厅冷却皮肤、案卷堆叠高度映射 tokenBudget）、真实 LLM provider（Ollama/Codex/Claude）
-- [ ] Phase 3：Git 分支隔离 + PR/Lint 拦截 + 站会大盘 + 持久化数据基座（datastore 驱动）
+- [x] Phase 3a：Git 分支隔离 + PR 门禁（三道防线）
+      · `git_policy.py`：simulated 影子仓库 + 分支隔离（Dev 只在 `<branch>` 提交，引擎绝不直改主干）+ pr_gate 节点开 PR（冲突 dry-run + 门禁脚本，任一红灯=rejected 复用红框三件套）
+      · schema 加 `git_policy` + Node.kind 枚举加 `pr_gate`（向后兼容）；validator 4e 关（pr_gate 必配 git_policy）
+      · 第二道：`scripts/git-hooks/`（pre-push 拒直推 main + commit-msg 角色越界护栏）；第三道：`.github/workflows/ci.yml`（PR 自动跑 e2e+V2+3a 三套单测 + 前端 tsc/布局）
+      · 单测 17/17 PASS（分支隔离/PR全绿/冲突红灯/门禁红灯/validator/全链路）；回归 45/45 全绿
+- [ ] Phase 3b/3c：subprocess 真 git 后端 + 站会大盘（Git流/拦截Bug/燃尽/迟滞榜）+ 持久化数据基座（datastore 驱动）

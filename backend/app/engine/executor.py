@@ -62,13 +62,15 @@ class UpstreamIndex:
 class NodeExecutor:
     def __init__(self, node: dict[str, Any], agent: dict[str, Any], wf: LoadedWorkflow,
                  bus: EventBus, progress: ProgressLog,
-                 resource_manager: Optional[Any] = None):
+                 resource_manager: Optional[Any] = None,
+                 git_policy: Optional[Any] = None):
         self.node = node
         self.agent = agent
         self.wf = wf
         self.bus = bus
         self.progress = progress
         self.rm = resource_manager
+        self.git_policy = git_policy
         self.level: int = 0                      # orchestrator 在调度时填
         self.node_id = node["id"]
         self.provider = (agent or {}).get("provider", "mock")
@@ -117,12 +119,18 @@ class NodeExecutor:
             outcome = NodeOutcome(self.level, self.node_id, ok=False,
                                   error="资源门拒绝：SQUAD_DEPLOYED 期间不接受新分配")
         else:
-            if missing:
+            # ★ Phase 3a：pr_gate 节点 = 对上游 Dev 分支开 PR + 跑合并门禁（引擎权威层）
+            if self.kind == "pr_gate":
+                outcome = await self._run_pr_gate(resolved, upstream)
+            elif missing:
                 reason = (f"上游输入缺失: {missing}"
                           f"（{'QA 拦截' if self.kind in ('qa', 'review') else '数据流断裂'}）")
                 outcome = NodeOutcome(self.level, self.node_id, ok=False, error=reason)
             else:
                 outcome = await self._execute_provider(resolved, estimate)
+                # ★ Phase 3a 分支隔离：Dev 节点成功后只在 <branch> 提交（缺省=节点 id），主干引擎直改被禁
+                if outcome.ok and self.git_policy is not None:
+                    outcome.outputs["branch"] = await self.git_policy.dev_submit(self.node, outcome.outputs)
 
         # ⑤ ★ 执行后打卡（挂起节点也打卡：状态可审计）
         self.progress.node_exit(self.level, self.node_id, self.provider,
@@ -137,6 +145,37 @@ class NodeExecutor:
             await self.bus.node_finished(self.level, self.node_id, ok=False,
                                          output=outcome.error or "")
         return outcome
+
+    # -------------------------------------------------------- Phase 3a PR 门禁
+    async def _run_pr_gate(self, resolved: dict[str, str],
+                           upstream: UpstreamIndex) -> NodeOutcome:
+        """pr_gate 节点：收集 inputs 引用的上游 Dev 节点 → 开 PR → 冲突+门禁脚本。
+        全绿 → 节点 ok（产物带 merge sha 证据）；任一红灯 → 节点失败（orchestrator 红框三件套接手）。"""
+        if self.git_policy is None:
+            return NodeOutcome(self.level, self.node_id, ok=False,
+                               error="pr_gate 节点需要 workflow.git_policy 配置（backend=simulated 起步）")
+        # 上游 Dev 节点 = inputs 里引用的全部 node_id（它们的 branch 已被 dev_submit 记录）
+        source_ids = []
+        for ref in self.node.get("inputs", []):
+            up_id = ref.partition(".")[0]
+            if up_id in upstream.outcomes and up_id not in source_ids:
+                source_ids.append(up_id)
+        if not source_ids:
+            return NodeOutcome(self.level, self.node_id, ok=False,
+                               error="pr_gate 缺 inputs：至少要引用一个 Dev 节点分支")
+        pr, checks = await self.git_policy.open_pr(self.node, source_ids)
+        await self.bus.publish("pr_checks", node_id=self.node_id, pr=pr.pr_id,
+                               state=pr.state, checks=checks)
+        if pr.state == "merged":
+            return NodeOutcome(self.level, self.node_id, ok=True,
+                               outputs={"merge_sha": pr.merge_sha or "",
+                                        "pr": pr.pr_id,
+                                        "checks": "; ".join(f"{c['name']}:{'✓' if c['passed'] else '✗'}"
+                                                           for c in checks)})
+        # 红灯：明细进 error（红框高亮时前端/控制台可见原因）
+        reds = "; ".join(f"[{c['name']}] {c['detail']}" for c in checks if not c["passed"])
+        return NodeOutcome(self.level, self.node_id, ok=False,
+                          error=f"PR {pr.pr_id} 被门禁拦截: {reds}")
 
     # -------------------------------------------------------- V2 资源门
     async def _acquire_resource(self) -> tuple[str, float]:

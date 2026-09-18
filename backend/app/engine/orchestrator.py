@@ -30,6 +30,7 @@ from .events import EventBus
 from .executor import NodeExecutor, NodeOutcome, UpstreamIndex
 from .resource_manager import ResourceManager, TickDriver
 from .squad import SquadExecutor, node_is_squad
+from .git_policy import GitPolicy
 
 # 挂起等待时的单次 tick 间隔（秒）：生产真睡，单测注入假 sleep
 PumpSleep = Callable[[float], Awaitable[None]]
@@ -42,11 +43,13 @@ class Orchestrator:
                  checkpoint_root: Optional[str] = None,
                  rm: Optional[ResourceManager] = None,
                  clock: Optional[Callable[[], float]] = None,
-                 sleep: Optional[PumpSleep] = None):
+                 sleep: Optional[PumpSleep] = None,
+                 git_policy: Optional[GitPolicy] = None):
         self.wf = wf
         self.bus = bus
         self.progress = progress
         self.rm = rm
+        self.git_policy = git_policy
         self._sleep: PumpSleep = sleep or (lambda d: asyncio.sleep(d))
         self._checkpoint_root = checkpoint_root
         self.checkpoint = CheckpointStore(project_root=checkpoint_root or str(wf.path), run_id=bus.run_id)
@@ -214,7 +217,8 @@ class Orchestrator:
         agent_ref = nd.get("agent")
         agent = self.wf.agents[agent_ref] if agent_ref else {}
         executor = NodeExecutor(node=nd, agent=agent, wf=self.wf, bus=self.bus,
-                                progress=self.progress, resource_manager=self.rm)
+                                progress=self.progress, resource_manager=self.rm,
+                                git_policy=self.git_policy)
         executor.level = level["index"]       # 行号注入（打卡与事件定位都要）
         return await executor.run(upstream)
 

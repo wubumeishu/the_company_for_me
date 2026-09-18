@@ -139,6 +139,11 @@ def _validate_v2(raw: dict[str, Any], agents: dict[str, dict[str, Any]]) -> None
             if int(w.get("limit", 0)) < 1 or int(w.get("periodSec", 0)) < 1:
                 raise ContractError(f"provider '{p.get('id')}' 的 rate.windows 参数非法: {w}（limit/periodSec 必须 ≥1）")
 
+    # 4e. Phase 3a：pr_gate 节点必须在顶层配 git_policy（没有配置权威层 = 门禁形同虚设）
+    has_pr_gate = any(nd.get("kind") == "pr_gate" for nd in _all_nodes(raw))
+    if has_pr_gate and "git_policy" not in raw:
+        raise ContractError("存在 kind=pr_gate 节点但顶层未配置 git_policy（PR 门禁缺少引擎权威层配置）")
+
 
 def _all_nodes(raw: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
