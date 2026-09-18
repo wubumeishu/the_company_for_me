@@ -205,7 +205,7 @@ class SquadExecutor:
     # ---------------------------------------------------------------- 成员干活（mock 通道）
     async def _member_work(self, m: SquadMember, room: SquadRoom, node: dict[str, Any],
                            upstream: dict[str, "NodeOutcome"]) -> None:
-        agent = self.wf.agents[m.agent_id]
+        agent = self.wf.resolved_agent(m.agent_id)
         prov = agent.get("provider", "mock")
 
         # 资源门：有 ResourceManager 且 provider 配了限流 → 干活前 acquire（冷却即休息）

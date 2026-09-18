@@ -17,11 +17,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import jsonschema
+
+from .org import (TemplateError, build_org_chart, departments_map,
+                  effective_agents, list_templates, unpack_templates,
+                  validate_org)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]          # backend/
 SCHEMA_PATH = PROJECT_ROOT.parent / "workflow_schema.json"  # 仓库根 workflow_schema.json
@@ -34,9 +38,11 @@ class ContractError(ValueError):
 
 @dataclass
 class LoadedWorkflow:
-    raw: dict[str, Any]                  # 原始 JSON（含 meta/agents/levels/qa）
+    raw: dict[str, Any]                  # 运行态（= 模板解包后的注册表，引擎消费这个）
     workflow_id: str
     path: Path
+    injected_agents: list[str] = field(default_factory=list)   # Phase 2b：模板注入的员工（审计/事件用）
+    _effective: Optional[dict[str, dict[str, Any]]] = field(default=None, init=False, repr=False)  # 继承视图缓存
 
     @property
     def levels(self) -> list[dict[str, Any]]:
@@ -48,7 +54,28 @@ class LoadedWorkflow:
 
     @property
     def departments(self) -> list[dict[str, Any]]:
-        return self.raw.get("departments", [])
+        """旧形态（数组）原样返回；新形态（实体字典）投影成同构数组 —— 消费方零改动。"""
+        d = self.raw.get("departments")
+        if isinstance(d, dict):
+            return [dict(v, id=k) for k, v in d.items()]
+        return d or []
+
+    def departments_map(self) -> dict[str, dict[str, Any]]:
+        """Phase 2b 部门实体视图：{dept_id: 实体}（旧数组形态 = 退化实体 {id,title}）。"""
+        return departments_map(self.raw)
+
+    @property
+    def effective_agents(self) -> dict[str, dict[str, Any]]:
+        """任务1 继承视图：个人 ∪ 部门（tools 并集 / boundaries 合并收紧）。
+        orchestrator / executor / squad / resource_manager 一律消费此视图。
+        raw 在 load 后已冻结（解包在 validate_contract 内完成）→ 计算一次缓存。"""
+        if self._effective is None:
+            self._effective = effective_agents(self.raw)
+        return self._effective
+
+    def resolved_agent(self, agent_id: str) -> dict[str, Any]:
+        """按 id 取继承后的员工视图（executor 构造入口；未知 id = 空 dict，保持旧语义）。"""
+        return self.effective_agents.get(agent_id, {})
 
     @property
     def squads(self) -> dict[str, Any]:
@@ -66,9 +93,16 @@ class LoadedWorkflow:
         return out
 
 
-def validate_contract(raw: dict[str, Any]) -> None:
-    """四关校验，全过才放行。"""
-    # 第 1 关：JSON Schema
+def validate_contract(raw: dict[str, Any]) -> list[str]:
+    """五关校验，全过才放行。返回模板解包注入的 agent id 列表（审计/事件用）。
+
+    时序铁律（Phase 2b 定）：
+      第 1 关 JSON Schema 校验的是【用户写的原始配置】（additionalProperties:false 全效）；
+      之后才 unpack_templates 解包（引擎受信任源，注入 agent 带 _source_template 运行态字段，
+      不再过 schema）；第 3 关的 agent 引用检查跑在解包【之后】——
+      节点可以直接引用模板注入的员工（如 frontend_cat），无需在配置里重复定义。
+    """
+    # 第 1 关：JSON Schema（用户配置契约）
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = jsonschema.Draft7Validator(schema)
     errors = sorted(validator.iter_errors(raw), key=lambda e: list(e.path))
@@ -76,12 +110,18 @@ def validate_contract(raw: dict[str, Any]) -> None:
         raise ContractError("workflow.json 不符合 workflow_schema.json: "
                             + "; ".join(f"{'/'.join(map(str, e.path))}: {e.message}" for e in errors[:5]))
 
+    # ★ Phase 2b：模板解包（部门.template → 注入员工 + 并入部门标配；旧数组形态原样放行）
+    try:
+        injected = unpack_templates(raw)
+    except TemplateError as e:
+        raise ContractError(f"模板解包失败: {e}")
+
     # 第 2 关：同行不变量（Strict Constraint #1 的引擎侧背书）
     for i, lvl in enumerate(raw.get("levels", [])):
         if lvl.get("index") != i:
             raise ContractError(f"同行不变量破坏: levels[{i}].index={lvl.get('index')}，必须等于数组下标（同一行 = 同一 index）")
 
-    # 第 3 关：节点 id 唯一 + agent 引用存在
+    # 第 3 关：节点 id 唯一 + agent 引用存在（解包后：模板员工也算注册表成员）
     seen: set[str] = set()
     agents = raw.get("agents", {})
     for lvl in raw.get("levels", []):
@@ -97,10 +137,18 @@ def validate_contract(raw: dict[str, Any]) -> None:
     # 第 4 关：V2 语义校验（字段缺省即跳过 → 旧配置零影响）
     _validate_v2(raw, agents)
 
+    # 第 4f 关：Phase 2b 组织语义关（head 引用 / 部门 tools 词汇 / 模板解包后的引用完整性）
+    try:
+        validate_org(raw)
+    except TemplateError as e:
+        raise ContractError(str(e))
+    return injected
+
 
 def _validate_v2(raw: dict[str, Any], agents: dict[str, dict[str, Any]]) -> None:
     """V2 部门/小队/限流引用一致性（防御性：宁可 422 也不带烂数据进调度器）。"""
-    dept_ids = {d.get("id") for d in raw.get("departments", []) if d.get("id")}
+    # ★ Phase 2b：departments 两种形态（旧数组 / 实体字典）统一走 departments_map
+    dept_ids = set(departments_map(raw).keys())
 
     # 4a. agent.department 声明了就必须存在于 departments 注册表
     for aid, ag in agents.items():
@@ -171,6 +219,7 @@ def load_workflow(workflow_id: Optional[str] = None, raw: Optional[dict[str, Any
                 raise ContractError(f"默认工作流不存在: {path}")
             raw = json.loads(path.read_text(encoding="utf-8"))
             workflow_id = "default"
-    validate_contract(raw)
+    injected = validate_contract(raw)
     return LoadedWorkflow(raw=raw, workflow_id=workflow_id or "default",
-                          path=Path(raw.get("meta", {}).get("projectRoot", "./")))
+                          path=Path(raw.get("meta", {}).get("projectRoot", "./")),
+                          injected_agents=injected)

@@ -95,6 +95,9 @@ cd backend && python tests/test_resource_manager.py
 # 后端 Phase 3a 单测（分支隔离 + PR 门禁 + 冲突红灯，17 项）
 cd backend && python tests/test_git_policy.py
 
+# 后端 Phase 2b 单测（部门实体 + 模板解包 + 继承合并 + Org Chart API，32 项）
+cd backend && python tests/test_org_templates.py
+
 # 前端布局不变量（同级同行 Y 锁行 + X 均布，node 直跑）
 cd frontend && node scripts/dump-snapshot.mjs
 
@@ -126,7 +129,13 @@ cd frontend && npm run build
       · `squad.py`：敏捷小队横抽 + SquadRoom 共享会议室 + QA 门禁 + 自动解散归建
       · orchestrator 重构：挂起等待（冷却→tick 唤醒→重跑）+ squad 节点分派
       · 单测 30/30 PASS（冷却恢复时间精确计算 / Tick 调度 / 小队 / 部门校验 / 冷却挂起集成）
-- [ ] Phase 2b/2c：工位视觉（咖啡厅冷却皮肤、案卷堆叠高度映射 tokenBudget）、真实 LLM provider（Ollama/Codex/Claude）
+- [x] Phase 2b：组织架构树 + 部门模板系统（部门实体化，"机制先行"延续）
+      · schema `departments` 升级 oneOf 双形态：旧数组（向后兼容）/ 实体字典（head/tools/boundaries/template）；工具词表加 `compiler`
+      · 模板库 `backend/app/templates/`：`agile_dev_squad`（前端猫+后端猫+QA猫监，标配 compiler/读写工具）+ `qa_watchdog`；部门声明 `template` 即加载期解包注入运行态（显式定义优先，绝不覆盖）
+      · `org.py` 继承层：员工 tools ∪ 部门 tools（并集）、boundaries 合并收紧（只收紧不放权）；`LoadedWorkflow.effective_agents` 供 orchestrator/executor/squad 消费
+      · API：`GET /org_chart`（CEO→部门Head→Agent 树+flat 双结构，可挂 live 资源状态"谁在搬砖"）+ `GET /templates`；顺修 `/runs` 活对象序列化 500（Phase 2a 遗留回归）
+      · 单测 32/32 PASS（解包/继承/组织校验关 4f/旧配置零影响/全链路/API 冒烟）；回归 62/62 全绿
+- [ ] Phase 2c：工位视觉（咖啡厅冷却皮肤、案卷堆叠高度映射 tokenBudget）+ 真实 LLM provider（Ollama/Codex/Claude）
 - [x] Phase 3a：Git 分支隔离 + PR 门禁（三道防线）
       · `git_policy.py`：simulated 影子仓库 + 分支隔离（Dev 只在 `<branch>` 提交，引擎绝不直改主干）+ pr_gate 节点开 PR（冲突 dry-run + 门禁脚本，任一红灯=rejected 复用红框三件套）
       · schema 加 `git_policy` + Node.kind 枚举加 `pr_gate`（向后兼容）；validator 4e 关（pr_gate 必配 git_policy）

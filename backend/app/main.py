@@ -25,6 +25,7 @@ from .engine.events import EventBus
 from .engine.orchestrator import Orchestrator
 from .persistence.progress import ProgressLog
 from .schema.validator import ContractError, load_workflow
+from .schema.org import build_org_chart, list_templates
 from .ws.stream import Hub, stream_endpoint
 
 # main.py 位于 backend/app/ 下：parents[2] = 仓库根 (H:/project/company)
@@ -103,9 +104,46 @@ hub.attach()
 app.add_api_websocket_route("/ws/run", stream_endpoint(hub))
 
 
+# ---------------------------------------------------------------- 历史 run 查询
 @app.get("/runs")
 async def runs() -> list[dict[str, Any]]:
-    return [dict(v, run_id=k) for k, v in RUNS.items()]
+    # 只导出可序列化字段（rm/bus = 活对象，/resources 端点内部消费，不进 JSON）
+    return [{k: v for k, v in RUNS[k].items() if k not in ("rm", "bus")} | {"run_id": k}
+            for k in RUNS]
+
+
+# ---------------------------------------------------------------- Phase 2b 组织 API
+@app.get("/org_chart")
+async def org_chart(workflow_id: Optional[str] = Query(default=None, description="读 workflows/<id>.json；缺省=仓库根 workflow.json"),
+                   live: bool = Query(default=False, description="挂最近一次 run 的实时资源状态（谁在搬砖/谁在休息）")) -> dict[str, Any]:
+    """任务3：CEO(Router) → 部门 Head → 部门内 Agent 结构化组织树。
+    双结构返回：tree（嵌套）+ flat（带 parent，React Flow 直接 nodes/edges）。"""
+    try:
+        wf = load_workflow(workflow_id=workflow_id)
+    except (ContractError, FileNotFoundError) as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    states: Optional[dict[str, Any]] = None
+    states_source = "configured"
+    if live:
+        # 最近一个含 rm 的 run（未完成=实时快照，已完成=终态快照）→ "点击 Head 展开看旗下谁在搬砖"
+        for run_id in reversed(list(RUNS)):
+            entry = RUNS[run_id]
+            rm = entry.get("rm")
+            if rm is None:
+                continue
+            states = entry.get("resources") or rm.snapshot()
+            states_source = "live" if entry["status"] == "running" else "last_run"
+            break
+
+    return build_org_chart(wf.raw, workflow_id=wf.workflow_id,
+                           states=states, states_source=states_source)
+
+
+@app.get("/templates")
+async def templates() -> dict[str, Any]:
+    """Phase 2b：内置部门模板库清单（前端"新建部门"下拉选模板用；零网络依赖）。"""
+    return {"templates": list_templates()}
 
 
 @app.get("/resources/{run_id}")

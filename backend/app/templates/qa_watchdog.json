@@ -1,0 +1,30 @@
+{
+  "template_id": "qa_watchdog",
+  "title": "QA 值守组（开箱即用）",
+  "description": "预置一只验收猫监 + 一只回归猫，标配编译验证(compiler)与只读工具。department 引用本模板 = 解包注入两名 QA 员工。",
+  "departmentHead": "review_cat",
+  "departmentTools": ["read_file", "terminal", "compiler", "git"],
+  "departmentBoundaries": {
+    "mustNot": ["修改业务代码", "修改测试用例掩盖缺陷"]
+  },
+  "agents": [
+    {
+      "id": "review_cat",
+      "role": "验收猫监（QA 主管）",
+      "provider": "mock",
+      "model": "cat-review-1",
+      "tools": ["read_file", "terminal", "compiler", "git"],
+      "boundaries": { "mustNot": ["修改业务代码", "放行红灯 PR"] },
+      "outputs": [ { "name": "review", "kind": "text" } ]
+    },
+    {
+      "id": "regression_cat",
+      "role": "回归猫（全量回归）",
+      "provider": "mock",
+      "model": "cat-reg-1",
+      "tools": ["read_file", "terminal", "compiler"],
+      "boundaries": { "mustNot": ["跳过回归套件", "修改测试用例掩盖缺陷"] },
+      "outputs": [ { "name": "regression_report", "kind": "text" } ]
+    }
+  ]
+}
