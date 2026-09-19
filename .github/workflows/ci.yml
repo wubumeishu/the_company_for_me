@@ -25,6 +25,12 @@ jobs:
         run: cd backend && python tests/test_resource_manager.py
       - name: Phase 3a 单测（分支隔离+PR门禁+冲突红灯）
         run: cd backend && python tests/test_git_policy.py
+      - name: Phase 2c 单测（模型配置中心+真实LLM限流挂起）
+        run: cd backend && python tests/test_provider_registry.py
+      - name: Phase 2c 单测（LLM executor+RESTING唤醒+usage_settle）
+        run: cd backend && python tests/test_llm_executor.py
+      - name: Phase 3b-① 单测（subprocess原语+影子仓worktree+venv隔离）
+        run: cd backend && python tests/test_subprocess_sandbox.py
       - name: Phase 2b 单测（部门实体+模板解包+继承合并+Org Chart）
         run: cd backend && python tests/test_org_templates.py
 
