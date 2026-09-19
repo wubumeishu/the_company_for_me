@@ -296,21 +296,34 @@ class SandboxRepo:
 
     async def add_worktree(self, node_id: str, branch: Optional[str] = None) -> Path:
         """给 Dev 开独立工位：worktrees/<node> @ branch（缺省 b/<node>；可传自定义如 dev-a）。
-        幂等：工位已存在则复用（纠错重试语义——同节点重跑叠在原 worktree 上，分支保留）。"""
+        幂等：工位已存在则复用（纠错重试语义——同节点重跑叠在原 worktree 上，分支保留）。
+
+        ★ flake 根因修复（3b② 收口后 3-round 序列复现）：不再 try/except 盲猜"分支在不在"。
+        旧逻辑 `worktree add -b br main` 一失败就假设"分支已存在"走 fallback，但 -b 失败
+        可能是并发/瞬时（同仓并行 worktree-add 抢 .git/worktrees/.lock），此时分支其实还没建
+        出来 → fallback `worktree add br` 报 "invalid reference: <br>"。
+        正解（rev-parse 显式判断，教训来自 9-19）：先问"分支在不在"，在=直接挂，不在=从 base 新建。"""
         await self.ensure_repo()
         br = _sanitize(branch) if branch else self.branch_for(node_id)
         self._branch_of[node_id] = br
         path = self.worktree_path(node_id)
         if path.exists():
-            return path
-        try:
-            await self._git("worktree", "add", str(path), "-b", br, self.base)
-        except SandboxGitError:
-            # 分支已存在但工位目录被清过（prune 后重跑）：直接挂现有分支，不再 -b
+            return path                       # 工位复用（纠错重试叠在原 worktree 上）
+        if await self._branch_exists(br):
+            # 分支已在（工位目录被 prune 清过但分支保留）：直接挂现有分支，不再 -b
             await self._git("worktree", "add", str(path), br)
+        else:
+            # 分支不存在：从 base 新建
+            await self._git("worktree", "add", str(path), "-b", br, self.base)
         if self.bus:
             await self.bus.publish("git_worktree_add", node_id=node_id, branch=br, path=str(path))
         return path
+
+    async def _branch_exists(self, name: str) -> bool:
+        """分支是否存在（权威判断，非 try/except 猜）：rev-parse --verify refs/heads/<name>。
+        0=在 / 非0=不在。用 refs/heads 全限定，避免与 tag/remote 同名歧义。"""
+        res = await self._git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}", check=False)
+        return res.returncode == 0
 
     async def commit_in_worktree(self, node_id: str, message: str,
                                  files: Mapping[str, str]) -> str:
