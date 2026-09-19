@@ -23,6 +23,9 @@ from pydantic import BaseModel
 
 from .engine.events import EventBus
 from .engine.orchestrator import Orchestrator
+from .engine.provider_registry import (PRESETS, PROVIDERS_FILE, Provider,
+                                       load_registry, save_registry,
+                                       apply_rate_to_ledger)
 from .persistence.progress import ProgressLog
 from .schema.validator import ContractError, load_workflow
 from .schema.org import build_org_chart, list_templates
@@ -71,10 +74,14 @@ async def run(req: RunRequest) -> dict[str, Any]:
     # ★ V2：资源管理器（provider 限流冷却门 + 状态机 + Tick 心跳随 orchestrator.run() 起停）
     from .engine.resource_manager import ResourceManager
     rm = ResourceManager(wf, bus)
+    # ★ Phase 2c：全局模型配置中心（providers.json 快照，注册表 rate 灌进账本，热切换）
+    registry = load_registry()
+    apply_rate_to_ledger(rm, registry)
     # ★ Phase 3a：Git 分支隔离 + PR 门禁（仅 workflow 配了 git_policy 时启用）
     from .engine.git_policy import GitPolicy
     gp = GitPolicy(wf, bus) if wf.raw.get("git_policy") else None
-    orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm, git_policy=gp)
+    orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm, git_policy=gp,
+                        llm_registry=registry)
 
     # run 事件接入 Hub：本 run 的所有事件扇出给每个 WS 客户端（按 ?run_id= 过滤）
     hub.link(bus)
@@ -144,6 +151,64 @@ async def org_chart(workflow_id: Optional[str] = Query(default=None, description
 async def templates() -> dict[str, Any]:
     """Phase 2b：内置部门模板库清单（前端"新建部门"下拉选模板用；零网络依赖）。"""
     return {"templates": list_templates()}
+
+
+# ---------------------------------------------------------------- Phase 2c 全局模型配置中心
+class ProviderUpsert(BaseModel):
+    """PUT /providers 请求体（整表覆盖，与 providers.json 同构）。"""
+    providers: list[dict[str, Any]]
+
+
+PROVIDERS_FILE_PATH = PROVIDERS_FILE
+
+
+@app.get("/providers")
+async def providers_get() -> dict[str, Any]:
+    """模型配置中心清单（api_key 脱敏 + 内置预设，前端"全局设置"面板数据源）。"""
+    from .engine.provider_registry import _mask
+    regs = load_registry()
+    return {
+        "providers": [
+            {"name": p.name, "type": p.type, "base_url": p.base_url,
+             "api_key": _mask(p.api_key), "default_model": p.default_model,
+             "rate": p.rate} for p in regs
+        ],
+        "presets": PRESETS,
+        "active": [p.name for p in regs],
+        "path": str(PROVIDERS_FILE_PATH),
+    }
+
+
+@app.put("/providers")
+async def providers_put(req: ProviderUpsert) -> dict[str, Any]:
+    """保存模型配置：校验后原子写 providers.json（立即生效，下一个 /run 读新配置）。"""
+    try:
+        saved = save_registry(req.providers)
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(status_code=422, detail=f"配置非法: {e}")
+    await _publish_provider_event("providers_saved", count=len(saved),
+                                  names=[p.name for p in saved])
+    return {"saved": [p.name for p in saved], "path": str(PROVIDERS_FILE_PATH)}
+
+
+@app.post("/providers/test")
+async def providers_test(req: ProviderUpsert) -> dict[str, Any]:
+    """连通性测试（前端"测试连接"按钮）：逐条 GET {base_url}/models，不写盘。"""
+    results = []
+    for d in req.providers:
+        try:
+            p = Provider.from_dict(d)
+            models = await p.client().list_models()
+            results.append({"name": p.name, "ok": True,
+                            "models": models[:20], "count": len(models)})
+        except Exception as e:
+            results.append({"name": d.get("name", "?"), "ok": False, "error": str(e)[:200]})
+    return {"results": results}
+
+
+async def _publish_provider_event(kind: str, **data: Any) -> None:
+    """providers_saved 进 Hub（前端设置面板"已保存 ✓"回执 + 时间线审计）。"""
+    await hub.bus.publish(kind, **data)
 
 
 @app.get("/resources/{run_id}")

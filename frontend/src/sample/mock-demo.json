@@ -1,28 +1,38 @@
 {
   "meta": { "name": "mock-demo 全链路(正常)", "version": "0.3.0", "projectRoot": ".", "timezone": "Asia/Tokyo" },
+  "departments": {
+    "pm":  { "title": "产品部", "head": "mock_pm" },
+    "dev": { "title": "研发部", "head": "mock_dev_fe" },
+    "qa":  { "title": "质量部", "head": "mock_qa" }
+  },
   "agents": {
     "mock_pm": { "id": "mock_pm", "role": "PM(模拟)", "provider": "mock", "model": "stub",
       "tools": ["read_file"], "systemPrompt": "模拟需求拆分，产出 spec。",
+      "department": "pm",
       "boundaries": { "mustNot": ["写代码"] }, "outputs": [{ "name": "spec", "kind": "text" }] },
-    "mock_dev_fe": { "id": "mock_dev_fe", "role": "前端工程师(模拟)", "provider": "mock",
+    "mock_dev_fe": { "id": "mock_dev_fe", "role": "前端工程师(模拟)", "provider": "mock", "department": "dev",
       "tools": ["write_file"], "boundaries": { "mustNot": ["触碰后端"] },
       "outputs": [{ "name": "code", "kind": "text" }] },
-    "mock_dev_be": { "id": "mock_dev_be", "role": "后端工程师(模拟)", "provider": "mock",
+    "mock_dev_be": { "id": "mock_dev_be", "role": "后端工程师(模拟)", "provider": "mock", "department": "dev",
       "tools": ["write_file"], "boundaries": { "mustNot": ["触碰前端"] },
       "outputs": [{ "name": "code", "kind": "text" }] },
-    "mock_qa": { "id": "mock_qa", "role": "QA 评审员(模拟)", "provider": "mock",
+    "mock_qa": { "id": "mock_qa", "role": "QA 评审员(模拟)", "provider": "mock", "department": "qa",
       "tools": ["read_file", "terminal"], "boundaries": { "mustNot": ["修改业务代码"] },
       "outputs": [{ "name": "qa_verdict", "kind": "text" }] }
   },
   "levels": [
     { "index": 0, "name": "L0 需求", "nodes": [
-      { "id": "n0_spec", "agent": "mock_pm", "task": "读取 IDEA.md，产出 spec" } ] },
+      { "id": "n0_spec", "agent": "mock_pm", "task": "读取 IDEA.md，产出 spec",
+        "tokenBudget": { "estimate": 3000 } } ] },
     { "index": 1, "name": "L1 并发实现", "gate": "all", "nodes": [
-      { "id": "n1_fe", "agent": "mock_dev_fe", "task": "按 spec 实现前端模块", "inputs": ["n0_spec.spec"] },
-      { "id": "n1_be", "agent": "mock_dev_be", "task": "按 spec 实现后端模块", "inputs": ["n0_spec.spec"] } ] },
+      { "id": "n1_fe", "agent": "mock_dev_fe", "task": "按 spec 实现前端模块", "inputs": ["n0_spec.spec"],
+        "tokenBudget": { "estimate": 12000 } },
+      { "id": "n1_be", "agent": "mock_dev_be", "task": "按 spec 实现后端模块", "inputs": ["n0_spec.spec"],
+        "tokenBudget": { "estimate": 6000 } } ] },
     { "index": 2, "name": "L2 QA/Review", "nodes": [
       { "id": "n2_qa", "agent": "mock_qa", "kind": "qa", "task": "验收 L1 两个节点产物",
-        "inputs": ["n1_fe.code", "n1_be.code"], "reviewCriteria": "产物非空且来源正确" } ] }
+        "inputs": ["n1_fe.code", "n1_be.code"], "reviewCriteria": "产物非空且来源正确",
+        "tokenBudget": { "estimate": 24000 } } ] }
   ],
   "qa": { "onFailure": ["console", "redHighlight", "rollback"],
            "rollback": { "targetLevel": 1, "keepCheckpoint": true, "notifyProgress": true },

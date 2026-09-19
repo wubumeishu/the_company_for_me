@@ -28,6 +28,7 @@ from ..persistence.progress import ProgressLog
 from ..schema.validator import LoadedWorkflow
 from .events import EventBus
 from .executor import NodeExecutor, NodeOutcome, UpstreamIndex
+from .provider_registry import Provider
 from .resource_manager import ResourceManager, TickDriver
 from .squad import SquadExecutor, node_is_squad
 from .git_policy import GitPolicy
@@ -44,12 +45,14 @@ class Orchestrator:
                  rm: Optional[ResourceManager] = None,
                  clock: Optional[Callable[[], float]] = None,
                  sleep: Optional[PumpSleep] = None,
-                 git_policy: Optional[GitPolicy] = None):
+                 git_policy: Optional[GitPolicy] = None,
+                 llm_registry: Optional[list[Provider]] = None):
         self.wf = wf
         self.bus = bus
         self.progress = progress
         self.rm = rm
         self.git_policy = git_policy
+        self.llm_registry = llm_registry or []            # Phase 2c：providers.json 快照（run 维度，热切换不重起服务）
         self._sleep: PumpSleep = sleep or (lambda d: asyncio.sleep(d))
         self._checkpoint_root = checkpoint_root
         self.checkpoint = CheckpointStore(project_root=checkpoint_root or str(wf.path), run_id=bus.run_id)
@@ -219,7 +222,8 @@ class Orchestrator:
         agent = self.wf.resolved_agent(agent_ref) if agent_ref else {}
         executor = NodeExecutor(node=nd, agent=agent, wf=self.wf, bus=self.bus,
                                 progress=self.progress, resource_manager=self.rm,
-                                git_policy=self.git_policy)
+                                git_policy=self.git_policy,
+                                llm_registry=self.llm_registry)
         executor.level = level["index"]       # 行号注入（打卡与事件定位都要）
         return await executor.run(upstream)
 
