@@ -372,8 +372,11 @@ pr_rejected（red_flags: [{check:"test", file:"x.py", detail:"AssertionError..."
    - **§1.4 BLOCKED 传播预埋**：`downstream_of` 纯函数沿 inputs 反向图 BFS，PR 被拒 → `node_blocked`（pr_gate + 全下游，reason=upstream_red）逐发，供 3c 大盘锁链描边；BLOCKED 派生态，上游转绿自动解锁。
    - `SandboxRepo` 补三段式（`stage_squash`/`commit_squash`/`discard_squash`）+ ref 原语（`merge_ff`/`checkout`/`branch`）+ `seed_from`（主仓代码树拷进影子仓做基准，checkScripts 自包含真跑）+ `run_shell_in_venv`（venv PATH 注入）。
    - `test_subprocess_git_policy.py` 22 项全绿（离线 FakeRunner + 真 git + 真 venv 三条红绿链；红线"每条红灯路径 main 全程未动"实测通过）。
-3. **3b-③** `dev_handoff` SOP 契约 + SOP Gate 校验（强契约，拍板 #4）；checkScripts 真跑（venv 默认 `SandboxRepo.run_in_venv`，Docker 可选 `execSandbox`）。
-4. **3b-④** 自动纠错回路：`red_flags` 注入 + `retry`/`rollback` 条件边 + **maxAttempts=3**（拍板 #3）+ 分支保留（LangGraph time-travel 语义）；**§1.4 node_blocked 红灯连锁传播** + **§1.5 tool_authorize 中介授权层** 随本步接入。
+3. **3b-③** ✅ **已完工**（2026-09-20）`dev_handoff` SOP 强契约 + SOP Gate（拍板 #4）——`backend/app/engine/sop_contract.py`（纯函数全分支：缺键/坏JSON/缺self_check子键/changed_files非list/合法）；`GitPolicy`/`SubprocessGitPolicy.dev_submit` 前置 `gate_dev_submit`（`sopContract=true` 时 dev_handoff 不合法 → 抛 `SopGateError`，executor 捕获 → 节点 FAIL + **不触发 git** + 发 `sop_fail` 事件，残缺/口头交接物理不进仓）；checkScripts 真跑（venv 默认 `run_shell_in_venv`，Docker 可选 `execSandbox` 位预留）。`test_sop_contract.py` 21 项全绿。
+4. **3b-④** ✅ **已完工**（2026-09-20）自动纠错回路 + 中介授权层：
+   - **§1.5 中介授权层**（`backend/app/engine/authorize_gate.py`，Agency-Agents Middleware Auth）：副作用三级 `none/local_write/external_side`（默认表对齐 `org.py` 工具词汇表 TOOL_VOCAB，未知工具保守档 external）+ 白名单 + grant + approval 断点，AND 全过才放行；executor `_execute_provider` 前置 `_authorize_tools`（mock/llm 共用），external 无 grant/高风险无审批令牌 → 抛 `AuthGateError` → 节点 FAIL + 发 `auth_block`；放行/拒绝都发 `tool_authorize`（全动作可回放）。`test_authorize_gate.py` 27 项全绿。
+   - **带错重做闭环**（拍板 #3 maxAttempts=3）：orchestrator 行 FAIL 前抓 pr_gate/qa 红灯明细 → `_last_gate_feedback`，回滚重跑 Dev 节点时经 `NodeExecutor(qa_feedback=…)` 注入其 prompt（Dev 看到"门禁红了哪条"再改）；`mock` 产物据此补 `FIXED:` 修复标记（首跑无反馈→门禁红，重做带标记→门禁绿）；`max_rollback` 默认 2→3。`test_autofix_loop.py` 真 Orchestrator 集成 12 项全绿（成功闭环 1 次 rollback + main 物理推进；恒红耗尽 3 次重试彻底 FAILED + main 全程未动 + `node_blocked` 8 条锁链）。
+   - **§1.4 node_blocked 红灯连锁传播**（3b-② 预埋的 `downstream_of` BFS）在本步随纠错回路的回滚重跑链路贯通。
 5. **3c** 站会大盘（git 实时流 / 拦截 Bug / 燃尽 / 迟滞榜，**受阻=琥珀锁链描边**视觉档）+ datastore 持久化基座（哈希链 problem_bank）。
 
 **测试铁律（主人红线：build 绿 ≠ QA 过）**：

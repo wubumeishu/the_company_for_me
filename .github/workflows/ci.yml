@@ -33,6 +33,12 @@ jobs:
         run: cd backend && python tests/test_subprocess_sandbox.py
       - name: Phase 3b-② 单测（真git分支路由+PR门禁venv真跑+BLOCKED传播）
         run: cd backend && python tests/test_subprocess_git_policy.py
+      - name: Phase 3b-③ 单测（dev_handoff强契约+SOP Gate 拦截不进git）
+        run: cd backend && python tests/test_sop_contract.py
+      - name: Phase 3b-④ 单测（中介授权层副作用分级+闸门+approval断点）
+        run: cd backend && python tests/test_authorize_gate.py
+      - name: Phase 3b-④ 单测（带错重做闭环 maxAttempts=3 真Orchestrator集成）
+        run: cd backend && python tests/test_autofix_loop.py
       - name: Phase 2b 单测（部门实体+模板解包+继承合并+Org Chart）
         run: cd backend && python tests/test_org_templates.py
 

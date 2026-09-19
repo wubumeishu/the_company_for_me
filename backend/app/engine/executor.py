@@ -35,6 +35,8 @@ from .events import EventBus
 from .provider_registry import LLMClient, LLMResult, Provider, ProviderError, provider_for_agent
 from .resource_manager import (RESOURCE_ACQUIRED, RESOURCE_BLOCKED,
                                RESOURCE_RESTING, TokenEstimator)
+from .sop_contract import SopGateError
+from .authorize_gate import AuthGateError
 
 
 @dataclass
@@ -68,7 +70,8 @@ class NodeExecutor:
                  bus: EventBus, progress: ProgressLog,
                  resource_manager: Optional[Any] = None,
                  git_policy: Optional[Any] = None,
-                 llm_registry: Optional[list[Provider]] = None):
+                 llm_registry: Optional[list[Provider]] = None,
+                 qa_feedback: Optional[str] = None):
         self.node = node
         self.agent = agent
         self.wf = wf
@@ -77,11 +80,36 @@ class NodeExecutor:
         self.rm = resource_manager
         self.git_policy = git_policy
         self.llm_registry = llm_registry            # Phase 2c：全局模型配置中心（providers.json 快照）
+        # ★ 3b-④ 任务 3「带错重做」：orchestrator 回滚重跑 Dev 时，把前次 QA 门禁红灯
+        #   报错日志作为上下文喂回（system prompt 追加），让 Dev 看到报错再改。
+        self.qa_feedback = qa_feedback
         self.level: int = 0                      # orchestrator 在调度时填
         self.node_id = node["id"]
         self.provider = (agent or {}).get("provider", "mock")
         self.kind = node.get("kind", "agent")
         self.max_turns = int((agent or {}).get("maxTurns", 12))
+
+    # -------------------------------------------------- 3b-④ 任务 2：中介授权层（Authorize Gate）
+    async def _authorize_tools(self, tools: list[str]) -> None:
+        """在执行任何工具前过一遍鉴权（_run_mock / _run_llm 前置链路，主人敲定）。
+        external_side 工具无 grant/approval → 抛 AuthGateError，让 Agent 自己意识到"没有权限"
+        （不静默放行）。放行/拒绝都发 tool_authorize 事件（全动作可回放，架构书 §1.5）。"""
+        from .authorize_gate import authorize
+        for tool in tools:
+            v = authorize(tool, self.agent)
+            await self.bus.publish("tool_authorize", node_id=self.node_id, tool=tool,
+                                   side_effect=v.side_effect, allowed=v.allowed,
+                                   reason=v.reason, approval=v.approval)
+            if not v.allowed:
+                raise AuthGateError(f"[授权闸门] {v.reason}（工具 {tool}，副作用={v.side_effect}）")
+
+    def _tool_names(self) -> list[str]:
+        """节点声明的工具调用：toolOverrides（节点级）> agent.tools（能力声明）。
+        授权闸门对这份清单做前置鉴权（mock 与 llm 通道共用）。"""
+        overrides = self.node.get("toolOverrides")
+        if overrides:
+            return list(overrides)
+        return list((self.agent or {}).get("tools", []) or [])
 
     # ------------------------------------------------------------------ 入口
     async def run(self, upstream: Optional[UpstreamIndex] = None) -> NodeOutcome:
@@ -133,10 +161,19 @@ class NodeExecutor:
                           f"（{'QA 拦截' if self.kind in ('qa', 'review') else '数据流断裂'}）")
                 outcome = NodeOutcome(self.level, self.node_id, ok=False, error=reason)
             else:
-                outcome = await self._execute_provider(resolved, estimate)
-                # ★ Phase 3a 分支隔离：Dev 节点成功后只在 <branch> 提交（缺省=节点 id），主干引擎直改被禁
-                if outcome.ok and self.git_policy is not None:
-                    outcome.outputs["branch"] = await self.git_policy.dev_submit(self.node, outcome.outputs)
+                try:
+                    outcome = await self._execute_provider(resolved, estimate)
+                    # ★ Phase 3a 分支隔离：Dev 节点成功后只在 <branch> 提交（缺省=节点 id），主干引擎直改被禁
+                    if outcome.ok and self.git_policy is not None:
+                        outcome.outputs["branch"] = await self.git_policy.dev_submit(self.node, outcome.outputs)
+                except SopGateError as e:
+                    # 3b-③ 任务1 SOP 强契约：dev_handoff 不合法 → 节点 FAIL + 不触发 git（dev_submit 已拦）
+                    await self.bus.publish("sop_fail", node_id=self.node_id, reason=str(e))
+                    outcome = NodeOutcome(self.level, self.node_id, ok=False, error=f"SOP Gate 拦截: {e}")
+                except AuthGateError as e:
+                    # 3b-④ 任务2 授权闸门：external 副作用未授权 → 节点 FAIL，Agent 自己意识到没权限
+                    await self.bus.publish("auth_block", node_id=self.node_id, reason=str(e))
+                    outcome = NodeOutcome(self.level, self.node_id, ok=False, error=f"授权闸门拦截: {e}")
 
         # ⑤ ★ 执行后打卡（挂起节点也打卡：状态可审计）
         self.progress.node_exit(self.level, self.node_id, self.provider,
@@ -197,6 +234,9 @@ class NodeExecutor:
         task = self.node.get("task", "")
         # task 含 "sim_fail" = 确定性失败钩子（演示 QA 拦截 + 红框 + 回退，不需要真 LLM）
         force_fail = "sim_fail" in task
+        # ★ 3b-④ 任务2：中介授权层前置鉴权（mock/llm 共用，工具执行前统一过闸门）。
+        #   external_side 工具无 grant/approval → 抛 AuthGateError（run() 捕获 → 节点 FAIL + auth_block）。
+        await self._authorize_tools(self._tool_names())
 
         if self.provider == "mock":
             await self._run_mock(resolved_inputs, fail=force_fail, estimate=estimate)
@@ -290,4 +330,11 @@ class NodeExecutor:
             self._pending = NodeOutcome(self.level, self.node_id, ok=False,
                                         error=f"sim_fail 钩子: {self.node.get('task', '')[:60]}")
         else:
+            # ★ 3b-④ 任务3「带错重做」：回滚重跑时 orchestrator 注入了前次 QA 门禁报错
+            # （self.qa_feedback 非空）→ Dev 在产物里补 FIXED 修复标记。门禁脚本据此
+            # 首跑红 / 重做绿（内容敏感），构成「提交→拦截→带错重做→再提交全绿」闭环。
+            if self.qa_feedback:
+                feedback_line = self.qa_feedback.strip().splitlines()[0][:80] if self.qa_feedback else ""
+                artifacts = {name: content + f"\nFIXED:{self.node_id} (已按QA反馈修复: {feedback_line})"
+                             for name, content in artifacts.items()}
             self._pending = NodeOutcome(self.level, self.node_id, ok=True, outputs=artifacts)

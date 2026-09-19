@@ -28,6 +28,7 @@ from typing import Any, Optional
 from .events import EventBus
 from .git_policy import Checker, PullRequest
 from .subprocess_sandbox import SandboxGitError, SandboxRepo
+from .sop_contract import SopGateError, gate_dev_submit, parse_handoff, build_commit_message
 from ..schema.validator import LoadedWorkflow
 
 
@@ -99,6 +100,8 @@ class SubprocessGitPolicy:
             trusted=bool(gp.get("trusted", False)),
             timeout=float(gp.get("gitTimeoutSec", 120)),
             seed_from=seed_root)
+        # 拍板 #4 强契约：git_policy.sopContract=true 时，dev_submit 强制校验 dev_handoff
+        self.sop_contract = bool(gp.get("sopContract", False))
         # repo 暴露 = 与 GitPolicy.repo（ShadowRepo）同名的属性位（测试/诊断用）
         self._preview_seq = 0
         self._prs: dict[str, PullRequest] = {}
@@ -106,11 +109,21 @@ class SubprocessGitPolicy:
     # ---------------------------------------------------------------- Dev 分支隔离
     async def dev_submit(self, node: dict[str, Any], artifacts: dict[str, str]) -> str:
         """Dev 节点完成：产物写进自己 worktree（物理工位），只在 <branch> commit。
-        返回 commit sha（QA 拦截可溯源）。幂等：同节点重跑（纠错重试）= 叠在原分支上。"""
+        返回 commit sha（QA 拦截可溯源）。幂等：同节点重跑（纠错重试）= 叠在原分支上。
+
+        ★ 3b-③ 强契约（拍板 #4）：sop_contract 开启时，dev_handoff 不合法 → 抛 SopGateError
+        （executor 捕获 → 节点 FAIL + 不触发 git + 发 sop_fail），残缺/口头交接物理不进仓。"""
         nid = node["id"]
+        if self.sop_contract:
+            gate_dev_submit(nid, artifacts)   # 不合法 → SopGateError（不进 git）
         branch = node.get("branch") or nid
         await self.repo.add_worktree(nid, branch)
-        msg = f"{nid}: {str(node.get('task', ''))[:40]}"
+        # commit msg：有合法 dev_handoff 用规范说明，否则回落 node task（sop 关闭档）
+        if self.sop_contract:
+            _hok, _hwhy, handoff = parse_handoff(artifacts.get("dev_handoff"))
+            msg = build_commit_message(handoff, nid)
+        else:
+            msg = f"{nid}: {str(node.get('task', ''))[:40]}"
         sha = await self.repo.commit_in_worktree(nid, msg, {k: str(v) for k, v in artifacts.items()})
         await self.bus.publish("git_commit", node_id=nid, branch=self.repo.branch_for(nid),
                                sha=sha, msg=msg, backend=self.backend)
