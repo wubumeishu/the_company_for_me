@@ -101,8 +101,10 @@ async def main():
     def always_429(payload):
         calls["n"] += 1
         return 429, {"error": {}}, {"Retry-After": "5"}
+    # executor 调用风格：chat(system, user, model=model) —— 位置参 s/self + u/system，kw model 兜底
     with mock.patch.object(LLMClient, "chat",
-                           lambda s, u, model=None, **k: real_chat(s, u, model=model, transport=always_429)):
+                           lambda self, system, user=None, model=None, **k:
+                               real_chat(self, system, user or "", model=model, transport=always_429)):
         out3 = await ex_narm.run()
         check("无 rm 时 429 → 节点失败（不挂起，罕见兜底）",
               (not out3.blocked and not out3.ok and "LLM 调用失败" in (out3.error or "")),
