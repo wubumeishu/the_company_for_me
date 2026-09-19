@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from .events import EventBus
+from .sop_contract import SopGateError, gate_dev_submit
 
 # checker 签名：(pr, 上下文) -> (通过?, 原因)。注入式，单测可换规则
 Checker = Callable[["PullRequest", dict[str, Any]], tuple[bool, str]]
@@ -101,6 +102,8 @@ class GitPolicy:
         self.base = gp.get("baseBranch", "main")
         self.check_scripts: list[str] = list(gp.get("checkScripts", []))
         self.repo = ShadowRepo(self.base)
+        # 拍板 #4 强契约（opt-in，默认关不破坏既有 3a 测试）：dev_submit 前置校验 dev_handoff
+        self.sop_contract = bool(gp.get("sopContract", False))
         self._prs: dict[str, PullRequest] = {}
         self._pr_seq = 0
         self._branch_map: dict[str, str] = {}    # node_id → 实际提交分支（缺省=节点 id）
@@ -108,7 +111,12 @@ class GitPolicy:
     # ---------------------------------------------------------------- Dev 分支隔离
     async def dev_submit(self, node: dict[str, Any], artifacts: dict[str, str]) -> str:
         """Dev 节点完成：只在 <branch>（缺省=节点 id）上 append 提交，绝不直改主干。
-        返回 commit sha（事件+产物里带证据，QA 拦截必须可溯源）。"""
+        返回 commit sha（事件+产物里带证据，QA 拦截必须可溯源）。
+
+        ★ 3b-③ 强契约（拍板 #4）：sop_contract 开启时，dev_handoff 不合法 → 抛 SopGateError
+        （executor 捕获 → 节点 FAIL + 不触发 git + 发 sop_fail），残缺/口头交接物理不进仓。"""
+        if self.sop_contract:
+            gate_dev_submit(node["id"], artifacts)   # 不合法 → 抛 SopGateError（不进 git）
         branch = node.get("branch") or node["id"]
         self._branch_map[node["id"]] = branch
         c = self.repo.commit(branch, node["id"], f"[{node['id']}] {node.get('task', '')[:40]}",

@@ -58,6 +58,9 @@ class Orchestrator:
         self.checkpoint = CheckpointStore(project_root=checkpoint_root or str(wf.path), run_id=bus.run_id)
         self._retry_count = 0
         self._clock = clock
+        # ★ 3b-④ 任务3「带错重做」：上一次 pr_gate 红灯的门禁报错日志（喂回 Dev 节点做上下文）。
+        # 首跑 = None；某行 pr_gate 红灯回滚前，把该红灯明细存进来，回滚重跑 Dev 时注入其 prompt。
+        self._last_gate_feedback: Optional[str] = None
 
     def _now(self) -> float:
         import time
@@ -98,7 +101,8 @@ class Orchestrator:
 
         results: dict[str, NodeResult] = dict(prev)
         qa_cfg = self.wf.raw.get("qa", {})
-        max_rollback = qa_cfg.get("retry", {}).get("maxAttempts", 2)
+        # 拍板 #3：maxAttempts 默认 3（红灯自动纠错回路上限）；既有 workflow 显式写 2 的不受影响
+        max_rollback = qa_cfg.get("retry", {}).get("maxAttempts", 3)
 
         start_level = rollback_target if rollback_target is not None else 0
         ran: dict[int, list[NodeResult]] = {}
@@ -148,6 +152,9 @@ class Orchestrator:
                 for nd, r in zip(level["nodes"], row_results):
                     if not r.ok:
                         await self.bus.red_highlight(idx, nd["id"], r.error or "行未通过")
+                # ★ 3b-④ 任务3「带错重做」：抓本次红灯行里 pr_gate/qa 节点的报错日志，
+                #   回滚重跑 Dev 时作为 qa_feedback 喂回（让 Dev 看到门禁红了哪条再改）。
+                self._last_gate_feedback = self._gate_feedback(row_results)
                 failed_level = idx
                 break
 
@@ -169,6 +176,16 @@ class Orchestrator:
         return {"success": success, "run_id": self.bus.run_id, "failed_level": failed_level,
                 "checkpoint": str(self.checkpoint.path),
                 "results": {k: {"ok": v.ok, "error": v.error} for k, v in results.items()}}
+
+    @staticmethod
+    def _gate_feedback(row_results: list["NodeOutcome"]) -> str:
+        """红灯行里所有失败节点的报错明细 → 一段反馈文本（「带错重做」的上下文，3b-④ 任务3）。
+        回滚前由 _run_pass 捕获，下一次重跑 Dev 节点时经 qa_feedback 注入其 prompt。"""
+        lines: list[str] = []
+        for r in row_results:
+            if not r.ok:
+                lines.append(f"- {r.node_id}: {r.error or '红灯（无明细）'}")
+        return "\n".join(lines)
 
     # ----------------------------------------------------- V2 挂起等待（冷却即休息）
     async def _resume_blocked(self, idx: int, level: dict[str, Any],
@@ -220,10 +237,13 @@ class Orchestrator:
         agent_ref = nd.get("agent")
         # ★ Phase 2b：继承视图（个人 ∪ 部门：tools 并集 / boundaries 收紧）——executor 消费的是合并后员工
         agent = self.wf.resolved_agent(agent_ref) if agent_ref else {}
+        # ★ 3b-④ 任务3「带错重做」：回滚重跑时把前次 QA 门禁红灯报错喂回 Dev 节点作上下文
+        # （Dev 看到「门禁红了哪条」再改；首跑 _last_gate_feedback=None，行为不变）。
         executor = NodeExecutor(node=nd, agent=agent, wf=self.wf, bus=self.bus,
                                 progress=self.progress, resource_manager=self.rm,
                                 git_policy=self.git_policy,
-                                llm_registry=self.llm_registry)
+                                llm_registry=self.llm_registry,
+                                qa_feedback=self._last_gate_feedback)
         executor.level = level["index"]       # 行号注入（打卡与事件定位都要）
         return await executor.run(upstream)
 
