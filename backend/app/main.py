@@ -79,7 +79,14 @@ async def run(req: RunRequest) -> dict[str, Any]:
     apply_rate_to_ledger(rm, registry)
     # ★ Phase 3a：Git 分支隔离 + PR 门禁（仅 workflow 配了 git_policy 时启用）
     from .engine.git_policy import GitPolicy
-    gp = GitPolicy(wf, bus) if wf.raw.get("git_policy") else None
+    from .engine.subprocess_git_policy import SubprocessGitPolicy
+    gp_cfg = wf.raw.get("git_policy") or {}
+    if gp_cfg.get("backend") == "subprocess":
+        gp = SubprocessGitPolicy(wf, bus, project_root=root)
+    elif gp_cfg:
+        gp = GitPolicy(wf, bus)
+    else:
+        gp = None
     orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm, git_policy=gp,
                         llm_registry=registry)
 

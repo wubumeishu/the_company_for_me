@@ -366,7 +366,12 @@ pr_rejected（red_flags: [{check:"test", file:"x.py", detail:"AssertionError..."
 ## 6. 落地顺序（3b → 3c，评审通过后按此排期）
 
 1. **3b-①** ✅ **已完工**（2026-09-20）`run_subprocess` 原语 + `SandboxRepo`（影子仓 init / worktree add-prune / 隔离 env / venv 默认档 / merge_squash / merge_dry_run）——`backend/app/engine/subprocess_sandbox.py`，26 项验收全绿（离线 FakeRunner 零真进程 + tmp 影子仓真 git + 真 venv 双链；红线"红灯路径 main 全程未动"实测通过）。
-2. **3b-②** `SubprocessGitPolicy`：`dev_submit`/`open_pr` 真 git 实现 + 分支路由；`git_policy.py` 一处接线（`backend=="subprocess"` 时切 impl，接口不变，底层换 `SandboxRepo`）。
+2. **3b-②** ✅ **已完工**（2026-09-20）`SubprocessGitPolicy`（`backend/app/engine/subprocess_git_policy.py`）：`dev_submit`/`open_pr` 真 git 实现 + 分支路由（接口 1:1 兼容 3a `GitPolicy`，main.py 按 `backend=="subprocess"` 切类，executor/orchestrator 零改动）。
+   - **分支路由**：Dev 产物写自己 worktree → 只在 `<branch>` commit；open_pr 走 preview 临时分支叠加 `merge --squash`（真 git 冲突检测，simulated 近似模型退役）。
+   - **红绿灯门禁**：checkScripts 经 venv 隔离真跑（`--system-site-packages` LOCAL-FIRST 复用系统解释器，零网络）；全绿 → squash commit + `main --ff-only` 推进（引擎唯一合法写主干，物理保证）；红灯 → `discard_squash` 清场 + main 毫发未动。
+   - **§1.4 BLOCKED 传播预埋**：`downstream_of` 纯函数沿 inputs 反向图 BFS，PR 被拒 → `node_blocked`（pr_gate + 全下游，reason=upstream_red）逐发，供 3c 大盘锁链描边；BLOCKED 派生态，上游转绿自动解锁。
+   - `SandboxRepo` 补三段式（`stage_squash`/`commit_squash`/`discard_squash`）+ ref 原语（`merge_ff`/`checkout`/`branch`）+ `seed_from`（主仓代码树拷进影子仓做基准，checkScripts 自包含真跑）+ `run_shell_in_venv`（venv PATH 注入）。
+   - `test_subprocess_git_policy.py` 22 项全绿（离线 FakeRunner + 真 git + 真 venv 三条红绿链；红线"每条红灯路径 main 全程未动"实测通过）。
 3. **3b-③** `dev_handoff` SOP 契约 + SOP Gate 校验（强契约，拍板 #4）；checkScripts 真跑（venv 默认 `SandboxRepo.run_in_venv`，Docker 可选 `execSandbox`）。
 4. **3b-④** 自动纠错回路：`red_flags` 注入 + `retry`/`rollback` 条件边 + **maxAttempts=3**（拍板 #3）+ 分支保留（LangGraph time-travel 语义）；**§1.4 node_blocked 红灯连锁传播** + **§1.5 tool_authorize 中介授权层** 随本步接入。
 5. **3c** 站会大盘（git 实时流 / 拦截 Bug / 燃尽 / 迟滞榜，**受阻=琥珀锁链描边**视觉档）+ datastore 持久化基座（哈希链 problem_bank）。
