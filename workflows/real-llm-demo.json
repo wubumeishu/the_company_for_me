@@ -1,0 +1,80 @@
+{
+  "meta": {
+    "name": "2c-real-llm",
+    "version": "0"
+  },
+  "agents": {
+    "dev": {
+      "id": "dev",
+      "role": "工程师",
+      "provider": "ollama",
+      "model": "agnes-3.0-flash",
+      "tools": [
+        "write_file"
+      ],
+      "boundaries": {},
+      "systemPrompt": "你是虚拟公司员工，用不超过80个字完成任务。",
+      "outputs": [
+        {
+          "name": "code",
+          "kind": "text"
+        }
+      ]
+    },
+    "qa": {
+      "id": "qa",
+      "role": "QA",
+      "provider": "ollama",
+      "model": "agnes-3.0-flash",
+      "tools": [
+        "read_file"
+      ],
+      "boundaries": {},
+      "systemPrompt": "验收只读，一句话给结论。",
+      "outputs": [
+        {
+          "name": "qa_verdict",
+          "kind": "text"
+        }
+      ]
+    }
+  },
+  "levels": [
+    {
+      "index": 0,
+      "name": "L0",
+      "nodes": [
+        {
+          "id": "n0",
+          "agent": "dev",
+          "task": "写一个 hello 模块说明（一句话）"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "name": "L1",
+      "gate": "all",
+      "nodes": [
+        {
+          "id": "n1",
+          "agent": "qa",
+          "kind": "qa",
+          "task": "验收 n0 产物",
+          "inputs": [
+            "n0.code"
+          ],
+          "reviewCriteria": "非空"
+        }
+      ]
+    }
+  ],
+  "qa": {
+    "onFailure": [
+      "console"
+    ],
+    "rollback": {
+      "targetLevel": 0
+    }
+  }
+}

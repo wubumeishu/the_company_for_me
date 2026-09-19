@@ -18,7 +18,10 @@ V2 资源门（任务 2 挂钩点，ResourceManager 判定，executor 只管消�
 
 Phase 1 provider 策略不变：
     mock     → 确定性本地桩（零外部依赖，全链路可离线跑通；task 含 "sim_fail" 时失败）
-    其它     → 尚未接真实 LLM，降级为 mock 并打 shell_log 事件明示（不静默换道）
+Phase 2c 真实通道：
+    registry 里能匹配到 openai-compat/ollama 条目 → LLMClient 真调 chat/completions，
+    usage 回写资源账本（rm.settle 真实扣减）；429/503 → rm.force_rest 强按 RESTING；
+    匹配不到 → 降级 mock 并打 shell_log 事件明示（不静默换道）。
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ from typing import Any, Optional
 from ..persistence.progress import ProgressLog
 from ..schema.validator import LoadedWorkflow
 from .events import EventBus
+from .provider_registry import LLMClient, LLMResult, Provider, ProviderError, provider_for_agent
 from .resource_manager import (RESOURCE_ACQUIRED, RESOURCE_BLOCKED,
                                RESOURCE_RESTING, TokenEstimator)
 
@@ -63,7 +67,8 @@ class NodeExecutor:
     def __init__(self, node: dict[str, Any], agent: dict[str, Any], wf: LoadedWorkflow,
                  bus: EventBus, progress: ProgressLog,
                  resource_manager: Optional[Any] = None,
-                 git_policy: Optional[Any] = None):
+                 git_policy: Optional[Any] = None,
+                 llm_registry: Optional[list[Provider]] = None):
         self.node = node
         self.agent = agent
         self.wf = wf
@@ -71,6 +76,7 @@ class NodeExecutor:
         self.progress = progress
         self.rm = resource_manager
         self.git_policy = git_policy
+        self.llm_registry = llm_registry            # Phase 2c：全局模型配置中心（providers.json 快照）
         self.level: int = 0                      # orchestrator 在调度时填
         self.node_id = node["id"]
         self.provider = (agent or {}).get("provider", "mock")
@@ -194,11 +200,76 @@ class NodeExecutor:
 
         if self.provider == "mock":
             await self._run_mock(resolved_inputs, fail=force_fail, estimate=estimate)
-        else:
-            # 真实 LLM 通道（ollama/codex/claude）未接入 → 明示降级，不静默换道
+            return self._pending
+        # ★ Phase 2c：真实 LLM 通道（provider_registry 匹配注册表条目）
+        entry = provider_for_agent(self.agent, self.llm_registry or [])
+        if entry is None:
+            # 注册表里没匹配 → 明示降级（不静默换道）
             await self.bus.publish("shell_log", node_id=self.node_id,
-                                   cmd=f"$ provider:{self.provider} (未接入, 降级为 mock 执行; 预估 {estimate} tok)")
+                                   cmd=f"$ provider:{self.provider} (providers.json 无匹配条目, 降级 mock; 预估 {estimate} tok)")
             await self._run_mock(resolved_inputs, fail=force_fail, estimate=estimate)
+            return self._pending
+        return await self._run_llm(entry, resolved_inputs, estimate)
+
+    # -------------------------------------------------------- Phase 2c 真实 LLM 通道
+    async def _run_llm(self, entry: Provider, resolved_inputs: dict[str, str], estimate: int) -> NodeOutcome:
+        """真实 chat/completions：usage 结算进账本；429/503 → force_rest 强按 RESTING。
+        sim_fail 钩子保留（真实模型上演示 QA 三件套仍可用）。"""
+        agent_id = self.node.get("agent", self.node_id)
+        task = self.node.get("task", "")
+        system = (self.agent.get("systemPrompt")
+                  or f"你是虚拟公司员工（{self.agent.get('role', self.provider)}），"
+                     f"边界：{self.agent.get('boundaries')}。完成任务并输出产物。")
+        user_parts = [f"任务：{task}"]
+        if resolved_inputs:
+            user_parts.append("上游产物（只读引用）：\n" +
+                              "\n\n".join(f"--- {k} ---\n{v[:4000]}" for k, v in resolved_inputs.items()))
+        model = self.agent.get("model") or None          # agent 级 model 优先；缺省 = 注册表条目 defaultModel
+
+        await self.bus.publish("thinking", node_id=self.node_id,
+                               text=f"[llm:{entry.name}] 调 {entry.base_url} (model={model or entry.default_model}),"
+                                    f" 预估 {estimate} tok")
+        try:
+            res: LLMResult = await entry.client(model).chat(system, "\n\n".join(user_parts), model=model)
+        except ProviderError as e:
+            # ★ 429/503 捕获（任务 3）：强按 RESTING（provider 级扩散），挂起等 tick 唤醒
+            if e.status in (429, 503) and self.rm is not None:
+                resume = self.rm._now() + (e.retry_after or 30.0)
+                await self.bus.publish("rate_limit_hit", agent=agent_id, resume_at=resume,
+                                       reason=f"llm_http_{e.status}", source="live_api",
+                                       retry_after=e.retry_after)
+                await self.rm.force_rest(agent_id, resume, reason=f"llm_http_{e.status}")
+                self._pending = NodeOutcome(self.level, self.node_id, ok=False, blocked=True,
+                                            resume_at=resume,
+                                            error=f"模型端限流 HTTP {e.status}，{e.retry_after or 30:.0f}s 后恢复（tick 唤醒）")
+            else:
+                self._pending = NodeOutcome(self.level, self.node_id, ok=False,
+                                            error=f"LLM 调用失败: {e}")
+                await self.bus.publish("shell_log", node_id=self.node_id, cmd=f"LLM 错误: {e}")
+            return self._pending
+
+        # ★ 真实 usage 结算（任务 3"真实请求扣减"）：补扣进 provider 账本；补扣触限 = 强按 RESTING
+        if self.rm is not None:
+            allowed, resume_at = self.rm.settle(agent_id, res.usage.get("total_tokens", 0))
+            await self.bus.publish("usage_settle", node_id=self.node_id, agent=agent_id,
+                                   usage=res.usage, model=res.model, provider=entry.name,
+                                   estimated=estimate)
+            if not allowed:
+                await self.rm.force_rest(agent_id, resume_at or self.rm._now() + 30.0, reason="usage_settle")
+                self._pending = NodeOutcome(self.level, self.node_id, ok=False, blocked=True,
+                                            resume_at=resume_at or 0.0,
+                                            error=f"真实用量触限（{res.usage.get('total_tokens')} tok），强制休息")
+                return self._pending
+
+        # sim_fail 钩子在真实通道也生效（离线演示 QA 三件套不依赖假模型）
+        if "sim_fail" in task:
+            self._pending = NodeOutcome(self.level, self.node_id, ok=False,
+                                        error=f"sim_fail 钩子（真实 LLM 已跑, usage={res.usage}）")
+            return self._pending
+
+        declared = [o.get("name", "report") for o in self.agent.get("outputs", [])] or ["report"]
+        artifacts = {name: res.content for name in declared}
+        self._pending = NodeOutcome(self.level, self.node_id, ok=True, outputs=artifacts)
         return self._pending
 
     async def _run_mock(self, resolved_inputs: dict[str, str], fail: bool = False, estimate: int = 0) -> None:

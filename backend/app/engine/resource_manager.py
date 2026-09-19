@@ -77,40 +77,50 @@ class WindowSpec:
 class RateLedger:
     """单 provider 的多窗口滑动配额账本（分钟级 + 小时级…）。
 
-    每个窗口独立记 deque[(ts)]，consume 前把 < now-period 的旧戳清掉再判余量。
+    每个窗口独立记 deque[(ts, amount)]，consume 前把 < now-period 的旧戳清掉再判余量。
+    Phase 2c 升级：每笔入账带 amount（token 量）。调用数语义 = 每笔 amount=1（Phase 2a
+    行为不变）；真实 LLM 结算 = 补扣真实 token 量（settle 路径）。
     无 windows（provider 没配 rate）= 恒放行，resume_at=None。
     """
 
     def __init__(self, windows: list[WindowSpec], cooldown_default: int = 0):
         self.windows = windows
-        self._hits: dict[int, deque[float]] = {i: deque() for i in range(len(windows))}
+        self._hits: dict[int, deque[tuple[float, int]]] = {i: deque() for i in range(len(windows))}
         self.cooldown_default = cooldown_default
+
+    def _used(self, i: int, now: float) -> int:
+        """窗口内已用配额（各笔 amount 之和；amount=1 时 = 调用数，2a 语义零变化）。"""
+        self._prune(i, now)
+        return sum(amount for _, amount in self._hits[i])
 
     def _prune(self, i: int, now: float) -> None:
         q = self._hits[i]
         spec = self.windows[i]
-        while q and now - q[0] >= spec.period_sec:
+        while q and now - q[0][0] >= spec.period_sec:
             q.popleft()
 
     def remaining(self, now: float) -> list[dict[str, Any]]:
         """各窗口余量快照（rate_window 事件 / UI 环形倒计时用）。"""
         out = []
         for i, spec in enumerate(self.windows):
-            self._prune(i, now)
-            left = spec.limit - len(self._hits[i])
+            used = self._used(i, now)
+            left = spec.limit - used
             out.append({"limit": spec.limit, "periodSec": spec.period_sec,
-                        "used": len(self._hits[i]), "remaining": max(left, 0),
+                        "used": used, "remaining": max(left, 0),
                         "resetAt": self.next_reset(i, now)})
         return out
 
     def next_reset(self, window_idx: int, now: float) -> float:
-        """窗口最早可用时刻：还有额度=now；满了=最旧戳 + 周期。"""
+        """窗口最早可用时刻（量感知）：还放得下 1 单位=now；否则=最旧一笔戳 + 周期
+        （即该笔账龄满、窗口量释放的最早时刻）。remaining() 快照 / UI 环形倒计时用。"""
         self._prune(window_idx, now)
         spec = self.windows[window_idx]
         q = self._hits[window_idx]
-        if len(q) < spec.limit:
+        if not q:
             return now
-        return q[0] + spec.period_sec
+        if self._used(window_idx, now) + 1 <= spec.limit:
+            return now
+        return q[0][0] + spec.period_sec
 
     def consume(self, tokens: int = 1, now: float = 0.0,
                 now_fn: Optional[Clock] = None) -> tuple[bool, Optional[float]]:
@@ -126,23 +136,31 @@ class RateLedger:
 
         projected: list[WindowSpec] = []
         for i, spec in enumerate(self.windows):
-            self._prune(i, now)
-            used = len(self._hits[i])
+            used = self._used(i, now)
             if used + tokens > spec.limit:
                 projected.append(spec)
         if not projected:
             for i in range(len(self.windows)):
-                self._hits[i].append(now)
+                self._hits[i].append((now, tokens))
             return True, None
 
-        # 触限：最保守恢复点 = max(各触限窗口最早重置 + cooldown)
+        # 触限：最保守恢复点（量感知）= 各触限窗口中"最早一笔账龄满后余量可容纳本次 n 单位"的时刻
+        # + 该窗口 cooldown；多窗口取最大值（最保守恢复点）。amount=1 时退化为 2a 的"最旧戳+周期"。
         resume = now
-        for spec in projected:
-            for i, s in enumerate(self.windows):
-                if s is spec:
-                    cooldown = spec.cooldown_sec or self.cooldown_default
-                    resume = max(resume, self.next_reset(i, now) + cooldown)
+        for i, spec in enumerate(self.windows):
+            if spec not in projected:
+                continue
+            q = self._hits[i]
+            cooldown = spec.cooldown_sec or self.cooldown_default
+            placed = False
+            for t in sorted({ts + spec.period_sec for ts, _ in q}):
+                used_at_t = sum(amount for ts, amount in q if ts > t - spec.period_sec)
+                if used_at_t + tokens <= spec.limit:
+                    resume = max(resume, t + cooldown)
+                    placed = True
                     break
+            if not placed:
+                resume = max(resume, now + spec.period_sec + cooldown)
         return False, resume
 
 
@@ -309,6 +327,32 @@ class ResourceManager:
                                windows=windows, reason=reason)
         await self.bus.publish("state_change", agent=agent_id, state=STATE_RESTING,
                                resume_at=resume_at, reason=reason)
+
+    # ---- 真实 LLM 结算（Phase 2c：usage 账本 + 429/503 强按 RESTING）----
+    def settle(self, agent_id: str, actual_tokens: int,
+               now: Optional[float] = None) -> tuple[bool, Optional[float]]:
+        """真实 usage 入账（任务 3"真实请求扣减"）：acquire 时按请求扣了 1 单位，
+        这里补扣 (实际 - 1) 个 token 单位进 provider 账本。返回 (allowed, resume_at)：
+        补扣触限 → 调用方把名下全员强按 RESTING（与触限路径同语义，账本不因真实用量失真）。"""
+        prov = self.wf.agents[agent_id].get("provider", "mock")
+        ledger = self.ledgers.get(prov)
+        if ledger is None or not ledger.windows:
+            return True, None                       # 未配限流 = 恒放行（向后兼容铁律）
+        extra = max(0, int(actual_tokens) - 1)
+        if extra == 0:
+            return True, None
+        return ledger.consume(extra, now_fn=lambda: now if now is not None else self._now())
+
+    async def force_rest(self, agent_id: str, resume_at: float, reason: str = "rate_limit") -> None:
+        """429/503 捕获入口（executor 消费点）：立即 RESTING + 事件。
+        走 provider 级扩散（同触限语义：API 冷却是 provider 事实，名下非 SQUAD 全员进咖啡厅）。"""
+        prov = self.wf.agents[agent_id].get("provider", "mock")
+        for aid, st in self.states.items():
+            if self.wf.agents[aid].get("provider") == prov and st.state != STATE_SQUAD:
+                st.state = STATE_RESTING
+                st.resume_at = resume_at
+                st.reason = reason
+        await self.on_limit_hit(agent_id, resume_at, reason=reason)
 
     # ---- Tick 心跳：到期唤醒（任务 2 核心，可注入 clock 单测）----
     async def tick(self, now: Optional[float] = None) -> list[str]:

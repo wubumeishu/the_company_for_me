@@ -1,6 +1,6 @@
 /** workflow_schema.json (draft-07) 的 TypeScript 镜像 —— 前后端共用同一份契约词汇。 */
 
-export type NodeKind = "agent" | "qa" | "review" | "gate";
+export type NodeKind = "agent" | "qa" | "review" | "gate" | "squad" | "pr_gate";
 export type ProviderId = "ollama" | "codex" | "claude" | "mock" | "builtin";
 
 export interface AgentDef {
@@ -12,6 +12,7 @@ export interface AgentDef {
   systemPrompt?: string;
   maxTurns?: number;
   outputs?: { name: string; kind?: string; path?: string }[];
+  department?: string;              // ★ Phase 2b/2c：部门归属（head 标识数据源）
 }
 
 export interface NodeDef {
@@ -23,6 +24,7 @@ export interface NodeDef {
   inputs?: string[];          // "upstreamNodeId.outputName"
   reviewCriteria?: string;
   onError?: { policy?: "failFast" | "retry" | "skip"; rollbackToLevel?: number };
+  tokenBudget?: { estimate?: number; contextHint?: number; outputHint?: number };  // ★ Phase 2c：工位案卷高度数据源
 }
 
 export interface LevelDef {
