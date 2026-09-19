@@ -31,6 +31,8 @@ jobs:
         run: cd backend && python tests/test_llm_executor.py
       - name: Phase 3b-① 单测（subprocess原语+影子仓worktree+venv隔离）
         run: cd backend && python tests/test_subprocess_sandbox.py
+      - name: Phase 3b-② 单测（真git分支路由+PR门禁venv真跑+BLOCKED传播）
+        run: cd backend && python tests/test_subprocess_git_policy.py
       - name: Phase 2b 单测（部门实体+模板解包+继承合并+Org Chart）
         run: cd backend && python tests/test_org_templates.py
 

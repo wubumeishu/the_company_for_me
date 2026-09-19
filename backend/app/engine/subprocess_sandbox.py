@@ -160,22 +160,33 @@ class SandboxRepo:
         root/worktrees/<node>/     每 Dev 一张独立工位（HEAD/工作区物理隔离）
         root/.venv/                层③ 默认 venv 运行时隔离
     分支模型：main（引擎唯一可写主干）+ b/<node_id>（Dev 专属，worktree 挂其上）
+
+    seed_from（项目根）：init 时把主仓代码树（排除 .git/.company/node_modules/…）
+      拷进影子仓做基准 commit —— 影子仓自包含完整代码库，checkScripts 在影子仓根
+      + venv 下真跑，且 Dev 工作区/主干都隔离于主仓（LOCAL-FIRST 零污染）。
     """
 
     SANDBOX_NAME = "git-sandbox"
     VENV_DIR = ".venv"
+    # seed 拷贝排除项（防递归 + 只拷源码不拷运行态/依赖树）
+    SEED_EXCLUDE = (".git", ".company", "node_modules", "dist", ".vite",
+                    ".venv", "__pycache__", ".DS_Store")
 
     def __init__(self, root: Path | str, *, base_branch: str = "main",
                  bus: Optional[EventBus] = None,
                  runner: Optional[Runner] = None,
                  trusted: bool = False,
-                 timeout: float = 120.0):
+                 timeout: float = 120.0,
+                 seed_from: Optional[Path | str] = None):
         self.root = Path(root)
         self.base = base_branch
         self.bus = bus
         self._runner: Runner = runner or run_subprocess
         self.trusted = trusted          # 单测 tmp 仓专用；生产一律 False（安全校验开启）
         self._timeout = timeout
+        self._branch_of: dict[str, str] = {}    # node_id → 实际分支名（add_worktree 时记录）
+        self._seed_from = Path(seed_from) if seed_from else None   # 项目根（init 时拷代码树）
+        self._init_lock: Optional[asyncio.Lock] = None            # 懒加载：init 全程串行（并发协程 guard）
         # 铁律 fail-fast：构造期就校验影子仓位置（真实 .git 在构造时即被拒绝，不留到调用期）
         self._assert_sandbox_root()
 
@@ -219,39 +230,77 @@ class SandboxRepo:
 
     # ---- 初始化
     async def ensure_repo(self) -> None:
-        """影子仓 init（幂等）：独立 git 库 + main 基准 + 本地 git 身份（不碰全局配置）。"""
+        """影子仓 init（幂等 + 并发安全）：独立 git 库 + main 基准 + 本地 git 身份。
+        seed_from 非空时先拷主仓代码树做基准。
+        ★ 并发安全：L0 多 Dev 经 asyncio.gather 并发，可能同时穿过「.git exists?」守卫
+        同时 git init → git-for-windows 模板 hook 拷贝撞车（File exists）。用懒加载锁
+        把 init 全程串行化（worktree/commit 仍设计内并行，各工位独立）。"""
         self._assert_sandbox_root()
         if self.root.joinpath(".git").exists():
             return
-        self.root.mkdir(parents=True, exist_ok=True)
-        await self._git("init", "-q")
-        await self._git("checkout", "-B", self.base)
-        await self._git("config", "user.name", "Company Engine")
-        await self._git("config", "user.email", "engine@company.local")
-        await self._git("config", "commit.gpgsign", "false")
-        (self.root / ".gitignore").write_text("worktrees/\n.venv/\n", encoding="utf-8")
-        await self._git("add", "-A")
-        await self._git("commit", "-q", "-m", "chore: git-sandbox init")
-        if self.bus:
-            await self.bus.publish("git_sandbox_init", root=str(self.root), base=self.base)
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self.root.joinpath(".git").exists():   # 双重检查：拿锁期间可能已被并发协程建好
+                return
+            self.root.mkdir(parents=True, exist_ok=True)
+            await self._git("init", "-q")
+            await self._git("checkout", "-B", self.base)
+            await self._git("config", "user.name", "Company Engine")
+            await self._git("config", "user.email", "engine@company.local")
+            await self._git("config", "commit.gpgsign", "false")
+            (self.root / ".gitignore").write_text("worktrees/\n.venv/\n", encoding="utf-8")
+            self._seed_copy()
+            await self._git("add", "-A")
+            await self._git("commit", "-q", "-m", "chore: git-sandbox init (seeded from project root)")
+            if self.bus:
+                await self.bus.publish("git_sandbox_init", root=str(self.root), base=self.base,
+                                       seeded=bool(self._seed_from))
+
+    def _seed_copy(self) -> None:
+        """把 seed_from（项目根）的代码树拷进影子仓根（排除 SEED_EXCLUDE）。
+        非破坏：只写影子仓内，主仓零改动。无 seed_from = 空仓 init（离线测试路径）。"""
+        if not self._seed_from or not self._seed_from.exists():
+            return
+        import shutil
+        for entry in self._seed_from.iterdir():
+            if entry.name in self.SEED_EXCLUDE:
+                continue
+            dest = self.root / entry.name
+            try:
+                if entry.is_dir():
+                    shutil.copytree(entry, dest, dirs_exist_ok=True,
+                                     ignore=shutil.ignore_patterns(*self.SEED_EXCLUDE))
+                else:
+                    shutil.copy2(entry, dest)
+            except (OSError, shutil.Error):
+                continue      # 单个文件拷失败不阻塞 init（seed 是优化项，非阻断）
 
     async def main_head(self) -> str:
         """main 当前 head sha（初始 commit 前 = 空串；红灯路径证明 main 未动的基准）。"""
         res = await self._git("rev-parse", "HEAD", check=False)
         return res.stdout.strip() if res.ok else ""
 
+    def has_file(self, rel: str) -> bool:
+        """影子仓根下是否有 <rel>（种子自包含验证 / checkScripts 前置诊断）。"""
+        return (self.root / rel).exists()
+
     # ---- Dev 工位（选项 A：每 Dev 独立 worktree 物理隔离）
     def worktree_path(self, node_id: str) -> Path:
         return self.root / "worktrees" / _sanitize(node_id)
 
     def branch_for(self, node_id: str) -> str:
-        return f"b/{_sanitize(node_id)}"
+        """node_id 的实际分支（add_worktree 时记录过 = 自定义 branch 字段，如 dev-a；
+        否则缺省 b/<node_id>）。"""
+        return self._branch_of.get(node_id, f"b/{_sanitize(node_id)}")
 
-    async def add_worktree(self, node_id: str) -> Path:
-        """给 Dev 开独立工位：worktrees/<node> @ b/<node>（从 main 基准拉出）。
+    async def add_worktree(self, node_id: str, branch: Optional[str] = None) -> Path:
+        """给 Dev 开独立工位：worktrees/<node> @ branch（缺省 b/<node>；可传自定义如 dev-a）。
         幂等：工位已存在则复用（纠错重试语义——同节点重跑叠在原 worktree 上，分支保留）。"""
         await self.ensure_repo()
-        path, br = self.worktree_path(node_id), self.branch_for(node_id)
+        br = _sanitize(branch) if branch else self.branch_for(node_id)
+        self._branch_of[node_id] = br
+        path = self.worktree_path(node_id)
         if path.exists():
             return path
         try:
@@ -312,6 +361,57 @@ class SandboxRepo:
             return False, res.stderr.strip()[:300] or res.stdout.strip()[:300]
         return True, ""
 
+    # ---- 三段式：stage → gate → commit/discard（3b-② pr_gate 专用）
+    # 多 Dev 分支叠加合入 = 顺序 stage 进 main index 物理检测冲突；
+    # gate（checkScripts）跑在 staged 状态上；全绿 commit 收编，红灯 discard 清空，main 未动。
+    async def stage_squash(self, node_id: str) -> bool:
+        """把 b/<node> 的改动 squash-stage 进 main index（不 commit）。
+        冲突 → hard reset 恢复 index/工作区原状，返回 False（门禁前即亮红灯，不打 dirty index）。"""
+        br = self.branch_for(node_id)
+        res = await self._git("merge", "--squash", br, check=False)
+        if res.returncode != 0:
+            await self._git("reset", "--hard", "-q", "HEAD", check=False)
+            return False
+        return True
+
+    async def has_staged(self) -> bool:
+        """main index 是否有待 commit 的 staged 改动（空合入判定：无内容=无操作，不算冲突）。"""
+        res = await self._git("diff", "--cached", "--quiet", check=False)
+        return res.returncode != 0      # diff --quiet：有差异 rc=1，无差异 rc=0
+
+    async def commit_squash(self, message: str) -> Optional[str]:
+        """全绿收编：把 staged 改动 commit 进 main（引擎唯一合法写主干路径，QA 可溯源 sha）。
+        无内容可提交（index 空）= 返回 None（无操作，非红灯）；其它失败抛错。"""
+        res = await self._git("commit", "-q", "-m", message, check=False)
+        if res.returncode != 0:
+            if "nothing to commit" in (res.stderr + res.stdout):
+                return None
+            raise SandboxGitError(f"main commit 失败（无 staged 内容或 index 异常）: "
+                                   f"{res.stderr.strip()[:300]}")
+        return (await self._git("rev-parse", "HEAD")).stdout.strip()
+
+    async def discard_squash(self) -> None:
+        """红灯打回：hard reset 清空 index + 工作区，恢复 HEAD 原状（冲突标记必须
+        --hard 才清得干净，物理保证 main 毫发未动）。"""
+        await self._git("reset", "--hard", "-q", "HEAD", check=False)
+
+    # ---- ref 原语（3b-② preview 合入用：合并发生在临时分支，main 只在全绿时 ff 推进）
+    async def checkout(self, ref: str) -> None:
+        await self._git("checkout", "-q", ref)
+
+    async def branch(self, name: str, ref: str) -> None:
+        await self._git("branch", "-q", name, ref, check=False)
+
+    async def delete_branch(self, name: str) -> None:
+        await self._git("branch", "-q", "-D", name, check=False)
+
+    async def merge_ff(self, branch: str) -> str:
+        """当前分支 ff-only 推进到 <branch>（preview 全绿后 main 收编；非快进=红灯抛错）。"""
+        res = await self._git("merge", "--ff-only", "-q", branch, check=False)
+        if res.returncode != 0:
+            raise SandboxGitError(f"ff-only {branch} 失败（非快进，main 未动）: {res.stderr.strip()[:300]}")
+        return (await self._git("rev-parse", "HEAD")).stdout.strip()
+
     async def prune_worktree(self, node_id: str, delete_branch: bool = True) -> None:
         """收工位：worktree remove（--force 允许未提交残留）+ 可选删分支 + prune 清理注册表。"""
         res = await self._git("worktree", "remove", "--force",
@@ -336,12 +436,14 @@ class SandboxRepo:
                                             else "bin/python")
 
     async def ensure_venv(self, with_pip: bool = False) -> Path:
-        """venv 隔离层（幂等）：默认 --without-pip 零网络快建；需要装依赖的 checkScripts
-        显式 with_pip=True。Docker 硬隔离档由 3b-③ execSandbox:"docker" 另接。"""
+        """venv 隔离层（幂等，LOCAL-FIRST）：--system-site-packages 复用系统已装依赖
+        （零网络），venv 仍隔离执行环境（独立目录/PYTHONPATH/PATH 注入）。Docker 硬隔离
+        档由 3b-③ execSandbox:"docker" 显式接入；with_pip=True 才装 pip。"""
         pyexe = self.venv_python()
         if pyexe.exists():
             return pyexe
-        cmd = [sys.executable, "-m", "venv", str(self.root / self.VENV_DIR)]
+        cmd = [sys.executable, "-m", "venv", "--system-site-packages",
+               str(self.root / self.VENV_DIR)]
         if not with_pip:
             cmd.insert(-1, "--without-pip")
         res = await self._runner(cmd, cwd=str(self.root), env=build_sandbox_env(),
@@ -359,3 +461,32 @@ class SandboxRepo:
             [str(pyexe), "-c", script], cwd=str(self.root),
             env=build_sandbox_env(), timeout=self._timeout,
             on_line=self._log(node_id))
+
+    def venv_bin(self) -> Path:
+        """venv 可执行目录（Windows=Scripts/，POSIX=bin/）。"""
+        return self.root / self.VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
+
+    def venv_env(self) -> dict[str, str]:
+        """checkScripts 用的最小 env + venv 注入：venv bin 置顶 PATH，
+        让 'python'/'pytest' 等解析到 venv 解释器（隔离 Python 依赖，拍板 #2）。"""
+        env = build_sandbox_env()
+        env["PATH"] = f"{self.venv_bin()}{os.pathsep}{env.get('PATH', '')}"
+        return env
+
+    async def run_shell_in_venv(self, script: str, *, node_id: str = "sandbox",
+                                with_pip: bool = False,
+                                check_timeout: Optional[float] = None,
+                                cwd: Optional[Path | str] = None,
+                                env_extra: Optional[dict[str, str]] = None,
+                                on_line: Optional[Callable[[str, str], None]] = None
+                                ) -> SubprocessResult:
+        """checkScripts 真跑（层③ venv 档）：shell 脚本 + venv PATH 注入，隔离 cwd。
+        非零 rc / 超时不抛错，由 SubprocessGitPolicy 转门禁红灯 + red_flags（可溯源）。"""
+        await self.ensure_venv(with_pip=with_pip)
+        env = self.venv_env()
+        if env_extra:
+            env.update(env_extra)
+        return await self._runner(
+            shell_cmd(script), cwd=str(cwd or self.root), env=env,
+            timeout=check_timeout or self._timeout,
+            on_line=on_line or (self._log(node_id)))
