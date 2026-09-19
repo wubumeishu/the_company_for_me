@@ -7,7 +7,7 @@
 import asyncio, sys, tempfile
 from pathlib import Path
 
-ROOT = Path(r"H:\project\company\backend")
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.engine.events import EventBus
@@ -174,7 +174,10 @@ async def test_real():
     env = build_sandbox_env()
     leaked = [k for k in env if any(s in k.upper() for s in ("TOKEN", "SECRET", "KEY"))]
     check("沙盒 env 最小化（无 TOKEN/SECRET/KEY 泄漏）", not leaked, str(leaked))
-    check("shell 包装按平台（Windows=cmd /c）", shell_cmd("x")[0] == "cmd")
+    # 平台感知：Windows=cmd /c，POSIX=/bin/sh -c
+    import os as _os
+    expected_shell = "cmd" if _os.name == "nt" else "/bin/sh"
+    check("shell 包装按平台（Windows=cmd /c，POSIX=/bin/sh）", shell_cmd("x")[0] == expected_shell)
 
 async def main():
     await test_offline()
