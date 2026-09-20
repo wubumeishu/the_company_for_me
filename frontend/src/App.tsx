@@ -1,7 +1,9 @@
-/** App 壳：左侧画布（React Flow + 行约束带）+ 右侧 LiveLogPanel（WS 事件时间线）。 */
+/** App 壳：左侧画布（React Flow + 行约束带）+ 右侧 DashboardDrawer（3c Git 流大盘）+ 审批小窗。 */
 import { useEffect, useState } from "react";
 import FlowCanvas from "./components/canvas/FlowCanvas";
-import LiveLogPanel from "./components/console/LiveLogPanel";
+import DashboardDrawer from "./components/dashboard/DashboardDrawer";
+import FixProgressBadge from "./components/dashboard/FixProgressBadge";
+import ApprovalModal from "./components/dashboard/ApprovalModal";
 import SettingsPanel from "./components/settings/SettingsPanel";
 import { useWorkflowStore } from "./store/workflowStore";
 import { connectRunSocket } from "./api/runSocket";
@@ -41,6 +43,10 @@ export default function App() {
     <div style={{ display: "flex", height: "100vh", background: "#0b1020", color: "#e5e7eb" }}>
       <div style={{ flex: 1, position: "relative" }}>
         <FlowCanvas />
+        {/* ★ Phase 3c 顶栏：纠错进度 x/3 徽标（rollback attempt 计数，实心/空心点） */}
+        <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 8, zIndex: 10 }}>
+          <FixProgressBadge />
+        </div>
         <div style={{
           position: "absolute", bottom: 12, left: 12, display: "flex", gap: 8, zIndex: 10,
         }}>
@@ -83,8 +89,12 @@ export default function App() {
           </span>
         </div>
         {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+        {/* ★ Phase 3c：§1.5 人类审批断点小窗（点画布 ⚖ 角标 → store.approvalTarget 驱动） */}
+        <ApprovalModal />
       </div>
-      <LiveLogPanel />
+      {/* ★ Phase 3c：右侧独立抽屉 —— Git 实时流 / 站会大盘（替换原 LiveLogPanel，
+          终端流 + PR 卡片 + 燃尽/拦截/迟滞 四标签；布局零改动，纯右侧栏挂载） */}
+      <DashboardDrawer />
     </div>
   );
 }

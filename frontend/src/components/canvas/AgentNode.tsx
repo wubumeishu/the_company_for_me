@@ -15,7 +15,11 @@
  *      环形倒计时（数据 = 后端 rate_limit_hit 的 resume_at → 本地 500ms 平滑倒数）
  *   ③ 部门负责人标识：head → 金色「★ 部长」徽章 + 金描边（/org_chart flat.head 注入）
  *
- * 铁律：所有新增视觉都在节点【内部】渲染，不碰 levelLayout 坐标 —— 同级同行不变量零风险。
+ * ★ Phase 3c 大盘装饰层（铁律：全部在节点【内部】渲染，不碰 levelLayout 坐标）：
+ *   ② 受阻琥珀锁链描边 ← store.nodeBlocked（§1.4 BFS 锁链，派生态：上游转绿自动解锁）
+ *   ④ 已带 QA 报错重做 小旗 ← store.redoNodes（回滚重跑 Dev 行 → 🚩）
+ *   ③ ⚖ 需审批 角标 ← store.authFlags（§1.5 external_side 未授权/高风险未审批）
+ *   节点状态色 ← 既有 STATUS_BORDER（灰/蓝/绿/红，blocked 时覆盖为琥珀虚线）
  */
 import { memo, useEffect, useRef, useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
@@ -55,6 +59,15 @@ export const AgentNode = memo(function AgentNode(props: NodeProps) {
   const res = useWorkflowStore((s) => s.agentRes[d.agent]);
   const resting = res?.state === "RESTING";
 
+  // ★ 3c 大盘装饰层（store 派生状态；节点【内部】渲染，坐标零改动）
+  const blocked = useWorkflowStore((s) => s.nodeBlocked[props.id]);
+  const redoNote = useWorkflowStore((s) => s.redoNodes[props.id]);
+  const auth = useWorkflowStore((s) => s.authFlags[props.id]);
+  const setApprovalTarget = useWorkflowStore((s) => s.setApprovalTarget);
+  const setDrawerFocus = useWorkflowStore((s) => s.setDrawerFocus);
+  // 审批角标只在"需要人介入"时显示：external_side 未放行 / 高风险未签发断点
+  const needsApproval = auth != null && !auth.allowed && auth.sideEffect === "external_side";
+
   // ---- ① 案卷堆叠：高度比例 = clamp(estimate/12000, 0.2, 1.0)（铁律映射）----
   const estimate = load?.estimate ?? d.tokenBudget?.estimate ?? 0;
   const ratio = estimate > 0 ? Math.min(1, Math.max(0.2, estimate / 12000)) : 0.2;
@@ -76,29 +89,71 @@ export const AgentNode = memo(function AgentNode(props: NodeProps) {
   const frac = resting && (res?.restTotal ?? 0) > 0 ? left / (res?.restTotal ?? 1) : 0;
 
   // ---- ② 咖啡厅皮肤（RESTING 切底色/边框；非 RESTING 保持原语义零变化）----
-  const bg = resting
-    ? "linear-gradient(160deg,#3b2a1a 0%,#2a1e12 100%)"
-    : status === "error" ? "#1f1215" : "#111827";
-  const border = resting && status !== "error" ? "2px solid #d97706" : STATUS_BORDER[status];
-  const shadow = status === "error"
-    ? "0 0 14px 2px rgba(239,68,68,.55)"
-    : resting ? "0 0 12px 1px rgba(217,119,6,.45)"
-      : status === "running" ? "0 0 10px 1px rgba(56,189,248,.4)"
-      : "0 1px 3px rgba(0,0,0,.5)";
+  // ★ 3c ②：受阻（§1.4 派生态）优先级最高 → 琥珀虚线描边（区别于失败红框；上游转绿自动解锁）
+  const isBlocked = blocked != null && !resting;
+  const bg = isBlocked
+    ? "linear-gradient(160deg,#2b230a 0%,#181403 100%)"
+    : resting
+      ? "linear-gradient(160deg,#3b2a1a 0%,#2a1e12 100%)"
+      : status === "error" ? "#1f1215" : "#111827";
+  const border = isBlocked
+    ? "2px dashed #f59e0b"
+    : resting && status !== "error" ? "2px solid #d97706" : STATUS_BORDER[status];
+  const shadow = isBlocked
+    ? "0 0 14px 1px rgba(245,158,11,.5)"
+    : status === "error"
+      ? "0 0 14px 2px rgba(239,68,68,.55)"
+      : resting ? "0 0 12px 1px rgba(217,119,6,.45)"
+        : status === "running" ? "0 0 10px 1px rgba(56,189,248,.4)"
+        : "0 1px 3px rgba(0,0,0,.5)";
   const head = d.head === true;
+  const textColor = isBlocked ? "#fcd34d" : resting ? "#fde68a" : "#e5e7eb";
 
   return (
-    <div style={{
+    <div
+      onClick={() => setDrawerFocus(props.id)}   // ②④：点节点 → 右侧抽屉浮出该节点焦点（blocked 锁链 / redo 说明）
+      style={{ position: "relative" }}
+    >
+      <div style={{
       width: 240, minHeight: 96,
       border, borderRadius: 10, padding: "10px 12px",
       background: bg,
-      color: resting ? "#fde68a" : "#e5e7eb",
+      color: textColor,
       boxShadow: shadow,
       position: "relative",
+      cursor: "pointer",
       fontFamily: "ui-monospace, Consolas, monospace",
       outline: head ? "2px solid #fbbf24" : "none",   // ★ ③ head 金描边（内层，不占布局）
       outlineOffset: 2,
     }}>
+      {/* ★ 3c ③：⚖ 需审批 角标（左上；external_side 未授权 → 点 = 弹审批小窗，§1.5 断点） */}
+      {needsApproval && (
+        <button
+          title={`⚖ ${auth!.tool} · ${auth!.sideEffect}\n${auth!.reason}`}
+          onClick={(e) => { e.stopPropagation(); setApprovalTarget(props.id); }}
+          style={{
+            position: "absolute", top: -11, left: -11, zIndex: 2,
+            width: 22, height: 22, borderRadius: "50%", border: "none", cursor: "pointer",
+            background: "#f59e0b", color: "#111827", fontWeight: 700, fontSize: 12,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 0 0 3px rgba(245,158,11,.35)",
+          }}
+        >⚖</button>
+      )}
+      {/* ★ 3c ④：🚩 已带 QA 报错重做 小旗（左下；回滚重跑过的 Dev 行） */}
+      {redoNote && (
+        <span
+          title={redoNote}
+          style={{
+            position: "absolute", bottom: -9, left: -9, zIndex: 2,
+            width: 20, height: 20, borderRadius: "50%",
+            background: "#2563eb", color: "#fff", fontSize: 11,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 0 0 3px rgba(37,99,235,.35)",
+          }}
+        >🚩</span>
+      )}
+
       {/* 入端手柄（上游数据流）*/}
       <Handle type="target" position={Position.Top} style={{ background: "#38bdf8" }} />
 
@@ -172,12 +227,20 @@ export const AgentNode = memo(function AgentNode(props: NodeProps) {
       {/* ★ ② 咖啡厅环形倒计时（RESTING 才显示） */}
       {resting && <CoffeeRing left={left} frac={frac} total={res?.restTotal ?? 0} />}
 
-      {status === "error" && (
+      {status === "error" && !isBlocked && (
         <div style={{ marginTop: 4, fontSize: 10, color: "#fca5a5" }}>⛔ 拦截/失败 — 已红框标记</div>
+      )}
+
+      {/* ★ 3c ②：受阻锁链标签（琥珀；区别于失败红框 —— BLOCKED=上游红灯连锁，待解锁） */}
+      {isBlocked && (
+        <div style={{ marginTop: 4, fontSize: 10, color: "#fcd34d" }} title={blocked!.reason}>
+          ⛓ 受阻 blocked_by: {blocked!.blockedBy.join(", ") || "上游红灯"}（上游转绿自动解锁）
+        </div>
       )}
 
       {/* 出端手柄（下游 / 行屏障） */}
       <Handle type="source" position={Position.Bottom} style={{ background: "#38bdf8" }} />
+      </div>
     </div>
   );
 });
