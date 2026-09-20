@@ -39,8 +39,10 @@ jobs:
         run: cd backend && python tests/test_authorize_gate.py
       - name: Phase 3b-④ 单测（带错重做闭环 maxAttempts=3 真Orchestrator集成）
         run: cd backend && python tests/test_autofix_loop.py
-      - name: Phase 3c尾 单测（problem_bank哈希链账本+暴力篡改检测+自动沉淀）
+      - name: Phase 3c尾① 单测（problem_bank哈希链账本+暴力篡改检测+自动沉淀）
         run: cd backend && python tests/test_problem_bank.py
+      - name: Phase 3c尾② 单测（WS审批真通路 人类公章HMAC令牌+全链路+账本留痕）
+        run: cd backend && python tests/test_approval_flow.py
       - name: Phase 2b 单测（部门实体+模板解包+继承合并+Org Chart）
         run: cd backend && python tests/test_org_templates.py
 

@@ -30,11 +30,12 @@ GENESIS_HASH = "0" * 64   # 链头哨兵：第一条记录的 prev_hash（"创�
 # 记录类型词表（引擎埋点 + 人工沉淀都用这套词汇，审计时可按类型过滤）
 RECORD_TYPES = ("gate_reject", "sop_fail", "auth_block", "auth_grant", "lesson")
 
-# 引擎事件 → 账本记录 的映射（自动沉淀三源；auth_grant 由 PR#11 审批通路写入）
+# 引擎事件 → 账本记录 的映射（自动沉淀四源；公章行为 auth_grant 也留账 = "每笔账都可审计"）
 _DEPOSIT_MAP: dict[str, str] = {
     "pr_rejected": "gate_reject",
     "sop_fail": "sop_fail",
     "auth_block": "auth_block",
+    "auth_grant": "auth_grant",
 }
 
 
@@ -54,7 +55,8 @@ def deposit_subscriber(bank: "ProblemBank"):
             flags = d.get("red_flags") or []
             detail = f"PR {d.get('pr', '?')} rejected: " + ("; ".join(str(x) for x in flags) or "（无明细）")
         else:
-            detail = str(d.get("reason", ""))[:4000]
+            # 多数事件明细在 reason；auth_grant 等发 detail=（公章行为），优先 detail 回落 reason
+            detail = str(d.get("detail") or d.get("reason", ""))[:4000]
         bank.append(rtype, ev.run_id, node_id=nid, detail=detail)
 
     return _deposit
