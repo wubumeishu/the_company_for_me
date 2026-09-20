@@ -377,7 +377,13 @@ pr_rejected（red_flags: [{check:"test", file:"x.py", detail:"AssertionError..."
    - **§1.5 中介授权层**（`backend/app/engine/authorize_gate.py`，Agency-Agents Middleware Auth）：副作用三级 `none/local_write/external_side`（默认表对齐 `org.py` 工具词汇表 TOOL_VOCAB，未知工具保守档 external）+ 白名单 + grant + approval 断点，AND 全过才放行；executor `_execute_provider` 前置 `_authorize_tools`（mock/llm 共用），external 无 grant/高风险无审批令牌 → 抛 `AuthGateError` → 节点 FAIL + 发 `auth_block`；放行/拒绝都发 `tool_authorize`（全动作可回放）。`test_authorize_gate.py` 27 项全绿。
    - **带错重做闭环**（拍板 #3 maxAttempts=3）：orchestrator 行 FAIL 前抓 pr_gate/qa 红灯明细 → `_last_gate_feedback`，回滚重跑 Dev 节点时经 `NodeExecutor(qa_feedback=…)` 注入其 prompt（Dev 看到"门禁红了哪条"再改）；`mock` 产物据此补 `FIXED:` 修复标记（首跑无反馈→门禁红，重做带标记→门禁绿）；`max_rollback` 默认 2→3。`test_autofix_loop.py` 真 Orchestrator 集成 12 项全绿（成功闭环 1 次 rollback + main 物理推进；恒红耗尽 3 次重试彻底 FAILED + main 全程未动 + `node_blocked` 8 条锁链）。
    - **§1.4 node_blocked 红灯连锁传播**（3b-② 预埋的 `downstream_of` BFS）在本步随纠错回路的回滚重跑链路贯通。
-5. **3c** 站会大盘（git 实时流 / 拦截 Bug / 燃尽 / 迟滞榜，**受阻=琥珀锁链描边**视觉档）+ datastore 持久化基座（哈希链 problem_bank）。
+5. **3c** ✅ **前端大盘首版已完工**（2026-09-20，v1.0.0 里程碑）Phase 3c React Flow 节点装饰 + 抽屉实装（线框拍板后落地，`lib/levelLayout.ts` 坐标引擎零改动——"同 Y 轴对齐"拓扑铁律不变量 `dump-snapshot.mjs` 复验全绿）：
+   - **`workflowStore.ts` 状态层先行**：引擎事件 → 派生状态（`nodeBlocked`/`prRecords`/`fixAttempts`/`authFlags`/`redoNodes`/`gitCommits` + UI 态 `expandedPr`/`drawerFocus`/`approvalTarget`/`approvalState`）。**BLOCKED 派生态不变量前端落实**：`node_start`（节点重新调度）自动解锁、`pr_checks merged` 按 `blocked_by` 精准消链、`run_start` 非回退重入全量清零——不存存储位。
+   - **`AgentNode.tsx` 四类节点装饰**（全在节点内部，坐标零改动）：② 受阻琥珀锁链描边（`⛓ blocked_by` 标签，区别于失败红框）/ ④ 🚩 带错重做小旗（回滚目标行重跑派生）/ ③ ⚖ 需审批角标（external_side 未授权才亮）/ 节点四态色保留。
+   - **`DashboardDrawer.tsx`**（右侧独立抽屉）：默认 Git 流标签页 = PR 门禁卡片（merged 绿/rejected 红，点击就地展开逐条 checkScripts ✓/✗ + red_flags 原始报错行 + merge_sha）+ 终端流（git_commit 证据 + venv 脚本输出尾）+ 燃尽/拦截Bug/迟滞榜三屏（接 store 真数字）。
+   - **`FixProgressBadge.tsx`**（顶栏纠错 x/3 徽标，实心/空心点 = rollback attempt 计数）+ **`ApprovalModal.tsx`**（§1.5 人类审批断点小窗：批准=签发断点令牌留痕 / 拒绝=auth_block 留痕，未来接 WS 引擎签 token）。
+   - 验证：`tsc --noEmit` 0 错（抓到 onEvent 重复声明 nid 1 处已修）+ `dump-snapshot.mjs` 同行不变量全通过 + `vite build` 4.7s 成功 + `levelLayout.ts` git diff 零改动。
+   - **3c 尾（下一阶段）**：datastore 持久化基座（哈希链 problem_bank）+ 燃尽/迟滞榜满血数字 + 审批断点 WS 签 token 真通路。
 
 **测试铁律（主人红线：build 绿 ≠ QA 过）**：
 - 离线可测：注入 fake `run_subprocess` → 分支路由/门禁红绿/回滚断言全程**不发真进程**（同 2c transport 注入思路）。
