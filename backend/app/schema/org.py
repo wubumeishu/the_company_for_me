@@ -258,7 +258,9 @@ def validate_org(raw: dict[str, Any]) -> None:
     · 部门 tools 必须与工具词汇表相容（防模板时代手写错别字进继承链）
     """
     TOOL_VOCAB = {"read_file", "write_file", "patch", "terminal", "compiler",
-                   "web_search", "web_extract", "git", "browser"}
+                   "web_search", "web_extract", "git", "browser",
+                   # 3b④/3c②：external_side 工具入部门词汇表（受 externalGrants + approval 断点管制）
+                   "send_email", "push_remote", "third_party_api", "deploy"}
     agents = raw.get("agents", {})
     for did, dept in departments_map(raw).items():
         head = dept.get("head")

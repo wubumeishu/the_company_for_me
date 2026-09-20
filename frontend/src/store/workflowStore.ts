@@ -102,7 +102,12 @@ interface Store {
   // ---- 3c 抽屉/弹窗 UI 态（点击交互）----
   expandedPr: string | null;                 // 抽屉里展开的 PR 卡片
   drawerFocus: string | null;                // 点击画布节点后抽屉浮出的焦点
-  approvalTarget: string | null;             // ⚖ 角标点击 → 审批小窗
+  approvalTarget: string | null;             // 审批小窗聚焦的 request_id（⚖ 角标 / approval_request 自动弹）
+  // ---- ★ 3c尾② 人类审批断点（§1.5 公章真通路）----
+  pendingApprovals: Record<string, { requestId: string; nodeId: string; tool: string;
+                                     sideEffect: string; reason: string }>;  // request_id → 挂起审批
+  /** 人类决定：POST /approval {run_id, request_id, decision} → 引擎签 HMAC 令牌放行挂起引擎 */
+  decideApproval(requestId: string, decision: "approve" | "deny"): Promise<void>;
 
   /** 载入 workflow.json（fetch 本地或内联样本），一次算好全量坐标 */
   loadWorkflow(wf: Workflow): void;
@@ -140,6 +145,7 @@ export const useWorkflowStore = create<Store>((set, get) => ({
   expandedPr: null,
   drawerFocus: null,
   approvalTarget: null,
+  pendingApprovals: {},
 
   loadWorkflow: (wf) => {
     const layouts = layoutAll(wf.levels);
@@ -161,6 +167,7 @@ export const useWorkflowStore = create<Store>((set, get) => ({
       set((s) => ({
         nodeBlocked: {}, prRecords: {}, fixAttempts: [], redoNodes: {},
         gitCommits: [], approvalState: {}, expandedPr: null, drawerFocus: null,
+        pendingApprovals: {},
       }));
     }
     const nid = typeof d.node_id === "string" ? d.node_id : null;
@@ -244,6 +251,36 @@ export const useWorkflowStore = create<Store>((set, get) => ({
           approval: d.approval != null ? String(d.approval) : null,
         } },
       }));
+    }
+
+    // ---- ★ 3c尾②：人类审批断点（§1.5 公章真通路：挂起审批请求 + 自动弹窗 + 收尾）----
+    if (ev.type === "approval_request" && typeof d.request_id === "string" && nid) {
+      // 引擎挂起等人类 → 前端自动弹 ApprovalModal（记 pending，点「批准/拒绝」走 decideApproval）
+      set((s) => ({
+        pendingApprovals: { ...s.pendingApprovals, [String(d.request_id)]: {
+          requestId: String(d.request_id), nodeId: nid, tool: String(d.tool ?? ""),
+          sideEffect: String(d.side_effect ?? ""), reason: String(d.reason ?? ""),
+        } },
+        approvalTarget: s.approvalTarget ?? String(d.request_id),   // 新请求自动聚焦（不打断已开的小窗）
+      }));
+    } else if (ev.type === "approval_granted" || ev.type === "approval_denied"
+             || ev.type === "approval_timeout") {
+      // 挂起解除：清 pending + 落 approvalState（小窗留痕"已批准/已拒绝/已超时"）+ 节点自动解锁
+      const rid = typeof d.request_id === "string" ? String(d.request_id) : null;
+      const decided = ev.type === "approval_granted"
+        ? "approved" as const : ev.type === "approval_denied" ? "rejected" as const : null;
+      set((s) => {
+        const pa = { ...s.pendingApprovals };
+        if (rid) delete pa[rid];
+        const out: Partial<Store> = { pendingApprovals: pa };
+        if (decided && nid) out.approvalState = { ...s.approvalState, [nid]: decided };
+        if (ev.type !== "approval_granted" && nid) {
+          // 拒绝/超时：节点转失败（等 orchestrator 走 QA 三件套；琥珀锁链由 node_blocked 驱动）
+          out.nodeStatus = { ...s.nodeStatus, [nid]: "error" };
+        }
+        if (rid && s.approvalTarget === rid) out.approvalTarget = null;
+        return out;
+      });
     }
 
     // ---- ★ Phase 2c ①：工位案卷负载（load_change → 案卷高度数据源）----
@@ -342,6 +379,17 @@ export const useWorkflowStore = create<Store>((set, get) => ({
     approvalState: { ...s.approvalState, [nodeId]: decision },
     approvalTarget: null,
   })),
+  // ★ 3c尾② 公章真通路：点「批准/拒绝」→ POST /approval 上行 → 引擎签/拒 HMAC 令牌。
+  // 挂起解除由 approval_granted/denied/timeout 事件回流（onEvent 已处理），这里只管发起。
+  decideApproval: async (requestId, decision) => {
+    const s = get();
+    if (!s.runId) return;   // 未连接 run = 无法上行（小窗此时也不该在等审批）
+    await fetch("http://127.0.0.1:8790/approval", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: s.runId, request_id: requestId, decision }),
+    }).catch(() => {});    // 引擎离线/拒绝 = 静默（事件流会带回真实结果）
+  },
 }));
 
 /** WS 事件 → 节点状态（ok 只在 run_finish 全局放行；节点级以 node_done/node_error 为准） */

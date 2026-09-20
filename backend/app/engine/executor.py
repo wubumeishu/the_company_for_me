@@ -71,7 +71,8 @@ class NodeExecutor:
                  resource_manager: Optional[Any] = None,
                  git_policy: Optional[Any] = None,
                  llm_registry: Optional[list[Provider]] = None,
-                 qa_feedback: Optional[str] = None):
+                 qa_feedback: Optional[str] = None,
+                 approval_broker: Optional[Any] = None):
         self.node = node
         self.agent = agent
         self.wf = wf
@@ -80,6 +81,9 @@ class NodeExecutor:
         self.rm = resource_manager
         self.git_policy = git_policy
         self.llm_registry = llm_registry            # Phase 2c：全局模型配置中心（providers.json 快照）
+        # ★ 3c②：人类审批断点协调器（per-run；agent.boundaries.approval=="wait" 时高风险
+        #   external 调用挂起等公章，而非直接 FAIL；缺省 None = 旧行为零回归）
+        self.approval_broker = approval_broker
         # ★ 3b-④ 任务 3「带错重做」：orchestrator 回滚重跑 Dev 时，把前次 QA 门禁红灯
         #   报错日志作为上下文喂回（system prompt 追加），让 Dev 看到报错再改。
         self.qa_feedback = qa_feedback
@@ -93,15 +97,49 @@ class NodeExecutor:
     async def _authorize_tools(self, tools: list[str]) -> None:
         """在执行任何工具前过一遍鉴权（_run_mock / _run_llm 前置链路，主人敲定）。
         external_side 工具无 grant/approval → 抛 AuthGateError，让 Agent 自己意识到"没有权限"
-        （不静默放行）。放行/拒绝都发 tool_authorize 事件（全动作可回放，架构书 §1.5）。"""
-        from .authorize_gate import authorize
+        （不静默放行）。放行/拒绝都发 tool_authorize 事件（全动作可回放，架构书 §1.5）。
+
+        ★ 3c② 人类公章 wait 通路：agent.boundaries.approval=="wait" 且该高风险 external 工具
+        已被授予 grant 时，不再即时拒绝，而是**挂起等人类签 HMAC 审批令牌**（broker.request），
+        引擎拿到令牌后 verify_token 三关再验（HMAC/nonce 一次性/TTL），通过才放行本次调用；
+        拒绝/超时 → 仍 AuthGateError（节点 FAIL + auth_block 留痕进哈希账本）。
+        缺省（无 wait / 无 grant / 非高风险 / broker 未接）= 原即时拒绝路径，零回归。"""
+        from .authorize_gate import authorize, HIGH_RISK_TOOLS, has_external_grant
+        wait_mode = (self.agent.get("boundaries") or {}).get("approval") == "wait"
         for tool in tools:
             v = authorize(tool, self.agent)
+            if v.allowed:
+                await self.bus.publish("tool_authorize", node_id=self.node_id, tool=tool,
+                                       side_effect=v.side_effect, allowed=True,
+                                       reason=v.reason, approval=v.approval)
+                continue
+            # 拒绝档：高风险 external + 已授 grant + wait 模式 + broker 已接 → 挂起等人类公章
+            if (wait_mode and self.approval_broker is not None
+                    and tool in HIGH_RISK_TOOLS and v.side_effect == "external_side"
+                    and has_external_grant(tool, self.agent)):
+                granted, token = await self.approval_broker.request(
+                    self.node_id, tool, v.side_effect, v.reason, self.bus)
+                if granted and self.approval_broker.verify_token(tool, token):
+                    # 令牌三关全过 → 本次调用放行（auth_grant 自动沉淀进哈希账本，PR#10）
+                    await self.bus.publish("tool_authorize", node_id=self.node_id, tool=tool,
+                                           side_effect=v.side_effect, allowed=True,
+                                           reason="人类公章：审批断点令牌已签发并校验通过",
+                                           approval=token)
+                    await self.bus.publish("auth_grant", node_id=self.node_id, tool=tool,
+                                           side_effect=v.side_effect,
+                                           detail=f"人类公章签发 {tool} 审批令牌并校验通过（HMAC/nonce/TTL 三关）")
+                    continue
+                # 人类拒绝 / 超时 / 令牌校验不过 → 挂起解除但仍不放行
+                await self.bus.publish("tool_authorize", node_id=self.node_id, tool=tool,
+                                       side_effect=v.side_effect, allowed=False,
+                                       reason=f"{v.reason} — 审批断点未放行", approval=None)
+                raise AuthGateError(
+                    f"[授权闸门] {v.reason} — 审批断点未放行（工具 {tool}，副作用={v.side_effect}）")
+            # 缺省路径（fail 模式 / 无 grant / 非高风险 / 无 broker）：即时拒绝（零回归）
             await self.bus.publish("tool_authorize", node_id=self.node_id, tool=tool,
-                                   side_effect=v.side_effect, allowed=v.allowed,
-                                   reason=v.reason, approval=v.approval)
-            if not v.allowed:
-                raise AuthGateError(f"[授权闸门] {v.reason}（工具 {tool}，副作用={v.side_effect}）")
+                                   side_effect=v.side_effect, allowed=False,
+                                   reason=v.reason, approval=None)
+            raise AuthGateError(f"[授权闸门] {v.reason}（工具 {tool}，副作用={v.side_effect}）")
 
     def _tool_names(self) -> list[str]:
         """节点声明的工具调用：toolOverrides（节点级）> agent.tools（能力声明）。

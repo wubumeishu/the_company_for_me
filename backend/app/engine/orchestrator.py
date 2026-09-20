@@ -46,13 +46,16 @@ class Orchestrator:
                  clock: Optional[Callable[[], float]] = None,
                  sleep: Optional[PumpSleep] = None,
                  git_policy: Optional[GitPolicy] = None,
-                 llm_registry: Optional[list[Provider]] = None):
+                 llm_registry: Optional[list[Provider]] = None,
+                 approval_broker: Optional[Any] = None):
         self.wf = wf
         self.bus = bus
         self.progress = progress
         self.rm = rm
         self.git_policy = git_policy
         self.llm_registry = llm_registry or []            # Phase 2c：providers.json 快照（run 维度，热切换不重起服务）
+        # ★ 3c②：人类审批断点协调器（per-run；main.py 建好后注入，executor 挂起等公章用）
+        self.approval_broker = approval_broker
         self._sleep: PumpSleep = sleep or (lambda d: asyncio.sleep(d))
         self._checkpoint_root = checkpoint_root
         self.checkpoint = CheckpointStore(project_root=checkpoint_root or str(wf.path), run_id=bus.run_id)
@@ -243,7 +246,8 @@ class Orchestrator:
                                 progress=self.progress, resource_manager=self.rm,
                                 git_policy=self.git_policy,
                                 llm_registry=self.llm_registry,
-                                qa_feedback=self._last_gate_feedback)
+                                qa_feedback=self._last_gate_feedback,
+                                approval_broker=self.approval_broker)
         executor.level = level["index"]       # 行号注入（打卡与事件定位都要）
         return await executor.run(upstream)
 

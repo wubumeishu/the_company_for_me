@@ -201,8 +201,8 @@
         "tools": {
           "type": "array",
           "uniqueItems": true,
-          "description": "Whitelist of tools this agent may use. Empty array = pure text-only agent. Phase 2b: 'compiler' = 编译/构建类工具（模板标配），与 'terminal' 并列。",
-          "items": { "type": "string", "enum": ["read_file", "write_file", "patch", "terminal", "compiler", "web_search", "web_extract", "git", "browser"] }
+          "description": "Whitelist of tools this agent may use. Empty array = pure text-only agent. Phase 2b: 'compiler' = 编译/构建类工具（模板标配），与 'terminal' 并列。3b④/3c②: external_side 工具（send_email/push_remote/third_party_api/deploy）入词表 —— 它们受 boundaries.externalGrants + approval 断点管制（默认最安全档：无 grant 物理拒绝）。",
+          "items": { "type": "string", "enum": ["read_file", "write_file", "patch", "terminal", "compiler", "web_search", "web_extract", "git", "browser", "send_email", "push_remote", "third_party_api", "deploy"] }
         },
         "workspace": { "type": "string", "default": "./", "description": "Sandbox path this agent may touch" },
         "maxTurns": { "type": "integer", "minimum": 1, "default": 12, "description": "ReAct step budget per execution" },
@@ -224,7 +224,16 @@
           "additionalProperties": false,
           "properties": {
             "mustNot": { "type": "array", "items": { "type": "string" } },
-            "requiresHumanApproval": { "type": "array", "items": { "type": "string" }, "description": "Actions needing 主人 sign-off, e.g. ['rm -rf', 'git push']" }
+            "requiresHumanApproval": { "type": "array", "items": { "type": "string" }, "description": "Actions needing 主人 sign-off, e.g. ['rm -rf', 'git push']" },
+            "allowedTools": { "type": "array", "items": { "type": "string" },
+              "description": "3b④ 中介授权层白名单：显式工具名单（覆盖 agent.tools 作白名单判定）；缺省 = 以 agent.tools 能力声明为白名单" },
+            "sideEffects": { "type": "object",
+              "description": "3b④ 副作用分级覆盖：工具名 → 副作用档（none 纯读 / local_write 影子仓内 / external_side 真实外部）；缺省 = 引擎默认工具副作用表（未知工具保守按 external_side）",
+              "additionalProperties": { "type": "string", "enum": ["none", "local_write", "external_side"] } },
+            "externalGrants": { "type": "array", "items": { "type": "string" },
+              "description": "3b④ 外部授权：该 agent 被显式授予的 external_side 工具清单（无 grant 的 external 调用物理拒绝，最安全档）" },
+            "approval": { "type": "string", "enum": ["fail", "wait"], "default": "fail",
+              "description": "3c② 人类审批断点模式：fail=高风险 external 无 grant/无审批令牌立即拒绝（缺省，零回归）；wait=挂起等人类签 HMAC 审批令牌（POST /approval，nonce 一次性 + TTL 防重放），签发/拒绝均留哈希账本" }
           }
         },
         "outputs": {
@@ -305,7 +314,16 @@
           "description": "部门级安全约束（只读 / 禁外网等）：与员工个人 boundaries 合并，mustNot 取并集（只收紧不放权）",
           "properties": {
             "mustNot": { "type": "array", "items": { "type": "string" } },
-            "requiresHumanApproval": { "type": "array", "items": { "type": "string" } }
+            "requiresHumanApproval": { "type": "array", "items": { "type": "string" } },
+            "allowedTools": { "type": "array", "items": { "type": "string" },
+              "description": "3b④ 部门级白名单：与员工个人 allowedTools/tools 合并（只收紧不放权）" },
+            "sideEffects": { "type": "object",
+              "description": "3b④ 部门级副作用分级覆盖（覆盖员工级单工具定义；与 Agent.boundaries.sideEffects 同构）",
+              "additionalProperties": { "type": "string", "enum": ["none", "local_write", "external_side"] } },
+            "externalGrants": { "type": "array", "items": { "type": "string" },
+              "description": "3b④ 部门级外部授权（并入员工 externalGrants；部门可统一给整组人授权）" },
+            "approval": { "type": "string", "enum": ["fail", "wait"], "default": "fail",
+              "description": "3c② 部门级审批断点模式（与员工个人 approval 合并；缺省 fail = 零回归）" }
           }
         },
         "template": { "type": "string", "description": "引用的预设模板 ID（如 'agile_dev_squad'），引擎加载时解包注入运行态" }

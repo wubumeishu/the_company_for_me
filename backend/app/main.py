@@ -90,7 +90,12 @@ async def run(req: RunRequest) -> dict[str, Any]:
         gp = None
     orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm, git_policy=gp,
                         llm_registry=registry)
-    # ★ Phase 3c 尾：problem_bank 哈希链账本（自动沉淀：pr_rejected/sop_fail/auth_block 红灯教训留账）
+    # ★ Phase 3c 尾②：人类审批断点协调器（per-run）——agent.boundaries.approval=="wait" 时
+    #   高风险 external 调用挂起等人类签 HMAC 令牌（POST /approval 触发 broker.approve/deny）
+    from .engine.approval import ApprovalBroker
+    broker = ApprovalBroker()
+    orch.approval_broker = broker
+    # ★ Phase 3c 尾①：problem_bank 哈希链账本（自动沉淀：pr_rejected/sop_fail/auth_block/auth_grant 留账）
     bus.subscribe(deposit_subscriber(ProblemBank(root)))
 
     # run 事件接入 Hub：本 run 的所有事件扇出给每个 WS 客户端（按 ?run_id= 过滤）
@@ -98,7 +103,7 @@ async def run(req: RunRequest) -> dict[str, Any]:
 
     run_id = bus.run_id
     RUNS[run_id] = {"workflow": wf.workflow_id, "status": "running", "result": None,
-                    "rm": rm, "bus": bus}
+                    "rm": rm, "bus": bus, "broker": broker}
 
     async def _drive() -> None:
         result = await orch.run()
@@ -124,8 +129,8 @@ app.add_api_websocket_route("/ws/run", stream_endpoint(hub))
 # ---------------------------------------------------------------- 历史 run 查询
 @app.get("/runs")
 async def runs() -> list[dict[str, Any]]:
-    # 只导出可序列化字段（rm/bus = 活对象，/resources 端点内部消费，不进 JSON）
-    return [{k: v for k, v in RUNS[k].items() if k not in ("rm", "bus")} | {"run_id": k}
+    # 只导出可序列化字段（rm/bus/broker = 活对象，/resources//approval 端点内部消费，不进 JSON）
+    return [{k: v for k, v in RUNS[k].items() if k not in ("rm", "bus", "broker")} | {"run_id": k}
             for k in RUNS]
 
 
@@ -271,6 +276,50 @@ async def problem_bank_deposit(req: LessonDeposit) -> dict[str, Any]:
     bank = ProblemBank(DEFAULT_ROOT)
     rec = bank.append("lesson", req.run_id or "manual", node_id=req.node_id, detail=req.detail)
     return {"record": rec, "chain": {"ok": bank.verify_chain().ok}}
+
+
+# ---------------------------------------------------------------- Phase 3c 尾②：人类审批断点（§1.5 公章真通路）
+class ApprovalDecision(BaseModel):
+    """POST /approval 请求体：前端 ApprovalModal 的「批准/拒绝」上行。"""
+    run_id: str
+    request_id: str
+    decision: str            # "approve" | "deny"
+    reason: Optional[str] = None
+
+
+@app.post("/approval")
+async def approval_decide(req: ApprovalDecision) -> dict[str, Any]:
+    """人类公章：批准 = broker 签 HMAC 令牌（nonce 一次性 + TTL）放行挂起引擎；
+    拒绝 = auth_block 留痕（自动沉淀哈希账本）。run 未知/请求失效 = 404/409。"""
+    from .engine.approval import ApprovalBroker
+    entry = RUNS.get(req.run_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"未知 run_id {req.run_id}")
+    broker = entry.get("broker")
+    if broker is None:
+        raise HTTPException(status_code=409, detail="该 run 未启用人类审批断点（旧 run）")
+    try:
+        if req.decision == "approve":
+            broker.approve(req.request_id)
+            return {"ok": True, "request_id": req.request_id, "decision": "approve",
+                    "token_issued": True}
+        if req.decision == "deny":
+            broker.deny(req.request_id, reason=req.reason or "人类拒绝")
+            return {"ok": True, "request_id": req.request_id, "decision": "deny"}
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+    raise HTTPException(status_code=422, detail=f"decision 须为 approve/deny（收到 {req.decision!r}）")
+
+
+@app.get("/approvals/{run_id}")
+async def approvals(run_id: str) -> dict[str, Any]:
+    """挂起中的审批请求清单（大盘"迟滞榜·审批中"数据源）。"""
+    from .engine.approval import ApprovalBroker
+    entry = RUNS.get(run_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"未知 run_id {run_id}")
+    broker = entry.get("broker") or ApprovalBroker()
+    return {"run_id": run_id, "pending": broker.pending_ids()}
 
 
 if __name__ == "__main__":

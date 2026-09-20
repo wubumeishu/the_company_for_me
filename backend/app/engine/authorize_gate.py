@@ -93,6 +93,10 @@ def _has_external_grant(tool: str, agent: dict[str, Any]) -> bool:
     return tool in (b.get("externalGrants") or [])
 
 
+# 公开别名（executor 审批通路 3c② 用：区分"有 grant 但缺令牌"（可等公章）vs"连 grant 都没有"（直接拒））
+has_external_grant = _has_external_grant
+
+
 def authorize(tool: str, agent: dict[str, Any],
               approval_token: Optional[str] = None) -> Verdict:
     """中介授权闸门：副作用分级 + 白名单 + grant + approval 断点，AND 全过才放行。
