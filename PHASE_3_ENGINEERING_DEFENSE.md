@@ -383,7 +383,8 @@ pr_rejected（red_flags: [{check:"test", file:"x.py", detail:"AssertionError..."
    - **`DashboardDrawer.tsx`**（右侧独立抽屉）：默认 Git 流标签页 = PR 门禁卡片（merged 绿/rejected 红，点击就地展开逐条 checkScripts ✓/✗ + red_flags 原始报错行 + merge_sha）+ 终端流（git_commit 证据 + venv 脚本输出尾）+ 燃尽/拦截Bug/迟滞榜三屏（接 store 真数字）。
    - **`FixProgressBadge.tsx`**（顶栏纠错 x/3 徽标，实心/空心点 = rollback attempt 计数）+ **`ApprovalModal.tsx`**（§1.5 人类审批断点小窗：批准=签发断点令牌留痕 / 拒绝=auth_block 留痕，未来接 WS 引擎签 token）。
    - 验证：`tsc --noEmit` 0 错（抓到 onEvent 重复声明 nid 1 处已修）+ `dump-snapshot.mjs` 同行不变量全通过 + `vite build` 4.7s 成功 + `levelLayout.ts` git diff 零改动。
-   - **3c 尾（下一阶段）**：datastore 持久化基座（哈希链 problem_bank）+ 燃尽/迟滞榜满血数字 + 审批断点 WS 签 token 真通路。
+   - **3c 尾·①problem_bank 哈希链账本（本 PR #10）**：`backend/app/persistence/problem_bank.py` —— 纯文本 JSONL + SHA256 哈希链（`.company/db/problem_bank.jsonl`，append-only + fsync，单写者零锁；`hash_i = SHA256(canonical_i + prev_hash)`，genesis = 64×0）；`verify_chain` 全量回放三重核对（hash 重算 + prev_hash 衔接 + seq 连续），**篡改一个标点即熔断且断点定位到行**；引擎三源（`pr_rejected`/`sop_fail`/`auth_block`）经 `deposit_subscriber` 自动沉淀，`POST /problem_bank` 人工沉淀 `lesson`；`GET /problem_bank` 查账 + `/problem_bank/verify` 验账 API。`test_problem_bank.py` 23 项全绿（含 B 段暴力篡改检测：改 1 标点/删中间行/改 prev_hash/篡改后续写洗白，四条全熔断）。
+   - **3c 尾·②WS 审批真通路（下一个 PR #11）**：高风险 external 动作挂起等人类签 HMAC 审批令牌（nonce 一次性 + TTL 防重放），签发/拒绝留 `auth_grant`/`auth_block` 进哈希账本。
 
 **测试铁律（主人红线：build 绿 ≠ QA 过）**：
 - 离线可测：注入 fake `run_subprocess` → 分支路由/门禁红绿/回滚断言全程**不发真进程**（同 2c transport 注入思路）。

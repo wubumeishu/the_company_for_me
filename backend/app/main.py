@@ -27,6 +27,7 @@ from .engine.provider_registry import (PRESETS, PROVIDERS_FILE, Provider,
                                        load_registry, save_registry,
                                        apply_rate_to_ledger)
 from .persistence.progress import ProgressLog
+from .persistence.problem_bank import ProblemBank, deposit_subscriber
 from .schema.validator import ContractError, load_workflow
 from .schema.org import build_org_chart, list_templates
 from .ws.stream import Hub, stream_endpoint
@@ -89,6 +90,8 @@ async def run(req: RunRequest) -> dict[str, Any]:
         gp = None
     orch = Orchestrator(wf, bus, progress, checkpoint_root=root, rm=rm, git_policy=gp,
                         llm_registry=registry)
+    # ★ Phase 3c 尾：problem_bank 哈希链账本（自动沉淀：pr_rejected/sop_fail/auth_block 红灯教训留账）
+    bus.subscribe(deposit_subscriber(ProblemBank(root)))
 
     # run 事件接入 Hub：本 run 的所有事件扇出给每个 WS 客户端（按 ?run_id= 过滤）
     hub.link(bus)
@@ -230,6 +233,44 @@ async def resources(run_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="该 run 无资源管理器（Phase1 旧 run）")
     snap = entry.get("resources") or rm.snapshot()
     return {"run_id": run_id, "status": entry["status"], "states": snap}
+
+
+# ---------------------------------------------------------------- Phase 3c 尾：problem_bank 哈希链账本
+class LessonDeposit(BaseModel):
+    """POST /problem_bank 人工沉淀（lesson 档）：公司经验/踩坑手动入账。"""
+    run_id: Optional[str] = None
+    node_id: Optional[str] = None
+    detail: str
+
+
+@app.get("/problem_bank")
+async def problem_bank_get(type_: Optional[str] = Query(default=None, alias="type"),
+                          run_id: Optional[str] = Query(default=None),
+                          node_id: Optional[str] = Query(default=None),
+                          limit: int = Query(default=200)) -> dict[str, Any]:
+    """查账：按类型/run/节点过滤 + 前 N 条（大盘"拦截Bug/迟滞榜"数据源；含全链 verify 状态）。"""
+    bank = ProblemBank(DEFAULT_ROOT)
+    recs = bank.query(type_=type_, run_id=run_id, node_id=node_id)[:limit]
+    rep = bank.verify_chain()
+    return {"records": recs, "count": len(recs),
+            "chain": {"ok": rep.ok, "seq_count": rep.seq_count,
+                      "broken_seq": rep.broken_seq, "reason": rep.reason}}
+
+
+@app.get("/problem_bank/verify")
+async def problem_bank_verify() -> dict[str, Any]:
+    """验账（哈希链含金量证明）：全量回放重算，篡改一个标点即熔断并报断点。"""
+    rep = ProblemBank(DEFAULT_ROOT).verify_chain()
+    return {"ok": rep.ok, "seq_count": rep.seq_count,
+            "broken_seq": rep.broken_seq, "reason": rep.reason}
+
+
+@app.post("/problem_bank")
+async def problem_bank_deposit(req: LessonDeposit) -> dict[str, Any]:
+    """人工沉淀 lesson：显式把一条经验写进哈希账本（公章行为，永久可审计）。"""
+    bank = ProblemBank(DEFAULT_ROOT)
+    rec = bank.append("lesson", req.run_id or "manual", node_id=req.node_id, detail=req.detail)
+    return {"record": rec, "chain": {"ok": bank.verify_chain().ok}}
 
 
 if __name__ == "__main__":
